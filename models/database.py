@@ -19,6 +19,7 @@ def init_db():
     from models.vehicle import Vehicle  # noqa: F401
     from models.deal import Deal, AlertLog  # noqa: F401
     from models.br_listing import BRMarketListing, BRPriceSnapshot  # noqa: F401
+    from models.watchlist import WatchlistItem, UserPreferences  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
 

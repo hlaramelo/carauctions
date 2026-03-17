@@ -8,7 +8,7 @@ from loguru import logger
 from config import load_settings
 from engine.cost_calculator import ImportCostCalculator
 from engine.currency import get_usd_brl_rate
-from engine.price_history import PriceHistoryEngine
+from engine.price_history import PriceHistoryEngine, BRMarketAnalyzer
 from models.vehicle import Vehicle
 from models.deal import Deal
 
@@ -22,6 +22,7 @@ class DealScorer:
         self.filters = settings["filters"]
         self.calculator = ImportCostCalculator()
         self.price_history = PriceHistoryEngine()
+        self.market_analyzer = BRMarketAnalyzer()
 
     def passes_filters(self, vehicle: Vehicle) -> bool:
         """Check if a vehicle passes the configured filters."""
@@ -63,6 +64,11 @@ class DealScorer:
             logger.debug(f"No BR price data for {vehicle}, skipping scoring")
             return None
 
+        # If we have both market and FIPE data, use conservative estimate
+        # (lower of market avg and FIPE to avoid overestimating)
+        if vehicle.br_price_avg and vehicle.fipe_price_brl:
+            br_price = min(vehicle.br_price_avg, vehicle.fipe_price_brl * 1.1)
+
         usd_brl = get_usd_brl_rate()
 
         breakdown = self.calculator.calculate(
@@ -83,9 +89,8 @@ class DealScorer:
         # 1. Margin score (0-100)
         scores["margin"] = min(100, max(0, margin * 2))  # 50% margin = 100 score
 
-        # 2. Liquidity score (0-100)
-        listings = vehicle.br_listings_count or 0
-        scores["liquidity"] = min(100, listings * 5)  # 20+ listings = 100
+        # 2. Liquidity score (0-100) - listings count + BR market trend
+        scores["liquidity"] = self._score_liquidity(vehicle)
 
         # 3. Condition score (0-100)
         scores["condition"] = self._score_condition(vehicle)
@@ -93,8 +98,8 @@ class DealScorer:
         # 4. Time remaining score (0-100)
         scores["time_remaining"] = self._score_time_remaining(vehicle)
 
-        # 5. Price history score (0-100) - based on auction bid trends
-        scores["price_history"] = self.price_history.score_price_history(vehicle.id)
+        # 5. Price history score (0-100) - auction bid trends + BR market direction
+        scores["price_history"] = self._score_combined_history(vehicle)
 
         # Weighted total
         total_score = sum(
@@ -116,6 +121,61 @@ class DealScorer:
         )
 
         return deal
+
+    def _score_liquidity(self, vehicle: Vehicle) -> float:
+        """Score liquidity: listings count + market velocity (appreciating market = easier sell)."""
+        listings = vehicle.br_listings_count or 0
+
+        # Base score from listings count
+        base = min(100, listings * 5)  # 20+ listings = 100
+
+        # Boost if BR market is appreciating (easier to sell at good price)
+        if vehicle.make and vehicle.model and vehicle.year:
+            trend = self.market_analyzer.get_market_trend(
+                vehicle.make, vehicle.model, vehicle.year
+            )
+            if trend["direction"] == "appreciating":
+                base = min(100, base + 15)  # Appreciating market = bonus
+            elif trend["direction"] == "depreciating":
+                base = max(0, base - 10)  # Depreciating = penalty
+
+        return base
+
+    def _score_combined_history(self, vehicle: Vehicle) -> float:
+        """Combined score from auction bid trends and BR market direction.
+
+        Auction bid trends (60% of this sub-score):
+        - Falling bids = great opportunity
+        - Bidding wars = lower score
+
+        BR market trends (40% of this sub-score):
+        - Appreciating BR market = car gaining value = good
+        - Depreciating = might sell for less than expected = bad
+        """
+        # Auction bid trend score
+        auction_score = self.price_history.score_price_history(vehicle.id)
+
+        # BR market trend score
+        market_score = 50.0  # Neutral default
+        if vehicle.make and vehicle.model and vehicle.year:
+            trend = self.market_analyzer.get_market_trend(
+                vehicle.make, vehicle.model, vehicle.year
+            )
+            change = trend["change_pct"]
+            if trend["direction"] != "insufficient_data":
+                if change >= 5:
+                    market_score = 85.0  # Appreciating well
+                elif change >= 2:
+                    market_score = 70.0
+                elif change >= -2:
+                    market_score = 55.0  # Stable
+                elif change >= -5:
+                    market_score = 35.0  # Slight depreciation
+                else:
+                    market_score = 20.0  # Depreciating fast
+
+        # Weighted combination
+        return auction_score * 0.6 + market_score * 0.4
 
     @staticmethod
     def _score_condition(vehicle: Vehicle) -> float:

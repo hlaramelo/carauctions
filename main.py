@@ -120,12 +120,18 @@ def run_scheduled():
     logger.info("  Alerts: every 30 min")
     logger.info("  Daily digest email: 08:00")
 
+    # Start Telegram command bot (background polling)
+    from notifications.telegram_commands import TelegramCommandHandler
+    bot = TelegramCommandHandler()
+    bot.start_polling()
+
     # Run initial pipeline
     run_full_pipeline()
 
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):
+        bot.stop_polling()
         logger.info("Scheduler stopped.")
 
 

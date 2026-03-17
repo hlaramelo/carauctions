@@ -16,6 +16,10 @@ gspread>=6.0
 google-auth>=2.27
 google-auth-oauthlib>=1.2
 
+# Dashboard
+streamlit>=1.30
+pandas>=2.1
+
 # Utilities
 pyyaml>=6.0
 loguru>=0.7

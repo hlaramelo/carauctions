@@ -13,6 +13,7 @@ from models.vehicle import Vehicle
 from notifications.email_sender import EmailSender
 from notifications.sheets_sync import SheetsSync
 from notifications.telegram_bot import TelegramNotifier
+from models.watchlist import WatchlistItem
 from scrapers.bring_a_trailer import BringATrailerScraper
 from scrapers.cars_and_bids import CarsAndBidsScraper
 from scrapers.copart import CopartScraper
@@ -353,6 +354,29 @@ def run_alerts():
                 all_deals_with_vehicles.append((deal, vehicle))
 
         sheets.sync_deals(all_deals_with_vehicles)
+
+        # Sync watchlist to sheets
+        watchlist_items = session.execute(
+            select(WatchlistItem).where(WatchlistItem.is_active == True)  # noqa: E712
+        ).scalars().all()
+
+        watchlist_data = []
+        for item in watchlist_items:
+            vehicle = session.get(Vehicle, item.vehicle_id) if item.vehicle_id else None
+            deal = None
+            if item.vehicle_id:
+                deal = session.execute(
+                    select(Deal).where(
+                        Deal.vehicle_id == item.vehicle_id,
+                        Deal.is_active == True,  # noqa: E712
+                    )
+                ).scalar_one_or_none()
+            watchlist_data.append((item, vehicle, deal))
+
+        sheets.sync_watchlist(watchlist_data)
+
+        # Append to history sheet (daily snapshot)
+        sheets.append_history(all_deals_with_vehicles)
 
         logger.info(f"Alerts complete: {len(deals_with_vehicles)} high-score deals")
     except Exception as e:

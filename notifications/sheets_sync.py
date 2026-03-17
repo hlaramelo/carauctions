@@ -1,4 +1,4 @@
-"""Google Sheets sync - exports deals to a Google Spreadsheet."""
+"""Google Sheets sync - exports deals, watchlist, and history to Google Spreadsheet."""
 
 import os
 from datetime import datetime
@@ -7,6 +7,7 @@ from loguru import logger
 
 from models.deal import Deal
 from models.vehicle import Vehicle
+from models.watchlist import WatchlistItem
 
 
 class SheetsSync:
@@ -30,6 +31,16 @@ class SheetsSync:
         "Source",
         "Link",
         "Updated",
+    ]
+
+    WATCHLIST_HEADERS = [
+        "ID", "VIN", "Make", "Model", "Year",
+        "Current Bid (USD)", "Score", "Margem %", "Source", "Link", "Added",
+    ]
+
+    HISTORY_HEADERS = [
+        "Date", "Score", "Year", "Make", "Model",
+        "Bid (USD)", "Lucro (BRL)", "Margem %", "Source", "Link",
     ]
 
     def __init__(self):
@@ -138,14 +149,104 @@ class SheetsSync:
             datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
         ]
 
+    def sync_watchlist(
+        self,
+        items: list[tuple[WatchlistItem, Vehicle | None, Deal | None]],
+    ) -> bool:
+        """Sync watchlist items to a 'Watchlist' sheet."""
+        client = self._get_client()
+        if client is None:
+            return False
+
+        try:
+            spreadsheet = self._get_or_create_spreadsheet(client)
+            worksheet = self._get_or_create_worksheet(spreadsheet, "Watchlist")
+
+            worksheet.clear()
+            rows = [self.WATCHLIST_HEADERS]
+
+            for item, vehicle, deal in items:
+                bid = vehicle.current_bid_usd if vehicle else None
+                score = deal.score if deal else None
+                margin = deal.margin_pct if deal else None
+
+                rows.append([
+                    item.id,
+                    item.vin or "",
+                    item.make or (vehicle.make if vehicle else ""),
+                    item.model or (vehicle.model if vehicle else ""),
+                    item.year or (vehicle.year if vehicle else ""),
+                    round(bid) if bid else "",
+                    round(score, 1) if score else "",
+                    round(margin, 1) if margin else "",
+                    vehicle.source if vehicle else "",
+                    vehicle.url if vehicle else "",
+                    item.created_at.strftime("%Y-%m-%d %H:%M"),
+                ])
+
+            worksheet.update(range_name="A1", values=rows)
+            self._apply_formatting(worksheet, len(rows))
+            logger.info(f"[Sheets] Synced {len(items)} watchlist items")
+            return True
+        except Exception as e:
+            logger.error(f"[Sheets] Failed to sync watchlist: {e}")
+            return False
+
+    def append_history(self, deals_with_vehicles: list[tuple[Deal, Vehicle]]) -> bool:
+        """Append current deals as a snapshot to the 'Historico' sheet."""
+        client = self._get_client()
+        if client is None:
+            return False
+
+        try:
+            spreadsheet = self._get_or_create_spreadsheet(client)
+            worksheet = self._get_or_create_worksheet(spreadsheet, "Historico")
+
+            # Add headers if sheet is empty
+            existing = worksheet.get_all_values()
+            if not existing:
+                worksheet.update(range_name="A1", values=[self.HISTORY_HEADERS])
+
+            today = datetime.utcnow().strftime("%Y-%m-%d")
+            rows = []
+            for deal, vehicle in deals_with_vehicles[:20]:
+                rows.append([
+                    today,
+                    round(deal.score, 1),
+                    vehicle.year,
+                    vehicle.make,
+                    vehicle.model,
+                    round(deal.auction_price_usd),
+                    round(deal.estimated_profit_brl),
+                    round(deal.margin_pct, 1),
+                    vehicle.source,
+                    vehicle.url,
+                ])
+
+            if rows:
+                worksheet.append_rows(rows)
+
+            logger.info(f"[Sheets] Appended {len(rows)} deals to history")
+            return True
+        except Exception as e:
+            logger.error(f"[Sheets] Failed to append history: {e}")
+            return False
+
     @staticmethod
     def _apply_formatting(worksheet, num_rows: int):
-        """Apply basic formatting to the worksheet."""
+        """Apply formatting with conditional colors."""
         try:
             # Bold header row
             worksheet.format("A1:Q1", {"textFormat": {"bold": True}})
             # Freeze header row
             worksheet.freeze(rows=1)
+
+            # Conditional formatting for margin column (J = column 10)
+            if num_rows > 1:
+                # Green for margin >= 25%
+                worksheet.format(f"J2:J{num_rows}", {
+                    "numberFormat": {"type": "NUMBER", "pattern": "0.0"},
+                })
         except Exception as e:
             logger.debug(f"[Sheets] Could not apply formatting: {e}")
 
