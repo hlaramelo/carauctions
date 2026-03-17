@@ -10,20 +10,20 @@ from models.br_listing import BRMarketListing
 from models.database import get_session, init_db
 from models.deal import Deal, AlertLog
 from models.vehicle import Vehicle
+from notifications.email_sender import EmailSender
 from notifications.sheets_sync import SheetsSync
 from notifications.telegram_bot import TelegramNotifier
 from scrapers.bring_a_trailer import BringATrailerScraper
+from scrapers.cars_and_bids import CarsAndBidsScraper
+from scrapers.copart import CopartScraper
+from scrapers.hemmings import HemmingsScraper
 from scrapers.br_market.fipe import FipeClient
 from scrapers.br_market.webmotors import WebmotorsScraper
 from scrapers.br_market.olx import OLXScraper
 
 
-def run_bat_scrape():
-    """Scrape Bring a Trailer and store listings."""
-    logger.info("=== Starting BaT scrape job ===")
-    scraper = BringATrailerScraper()
-    vehicles = scraper.scrape_listings()
-
+def _save_scraped_vehicles(vehicles: list[Vehicle], source_label: str):
+    """Save scraped vehicles to database (upsert). Shared by all auction scrapers."""
     session = get_session()
     new_count = 0
     updated_count = 0
@@ -38,11 +38,16 @@ def run_bat_scrape():
             ).scalar_one_or_none()
 
             if existing:
-                # Update bid price and other changing fields
                 if vehicle.current_bid_usd:
                     existing.current_bid_usd = vehicle.current_bid_usd
+                if vehicle.buy_now_price_usd:
+                    existing.buy_now_price_usd = vehicle.buy_now_price_usd
                 if vehicle.auction_end:
                     existing.auction_end = vehicle.auction_end
+                if vehicle.mileage:
+                    existing.mileage = vehicle.mileage
+                if vehicle.engine_cc:
+                    existing.engine_cc = vehicle.engine_cc
                 existing.is_active = True
                 updated_count += 1
             else:
@@ -50,12 +55,44 @@ def run_bat_scrape():
                 new_count += 1
 
         session.commit()
-        logger.info(f"BaT scrape complete: {new_count} new, {updated_count} updated")
+        logger.info(f"{source_label} scrape complete: {new_count} new, {updated_count} updated")
     except Exception as e:
-        logger.error(f"Error saving BaT vehicles: {e}")
+        logger.error(f"Error saving {source_label} vehicles: {e}")
         session.rollback()
     finally:
         session.close()
+
+
+def run_bat_scrape():
+    """Scrape Bring a Trailer and store listings."""
+    logger.info("=== Starting BaT scrape job ===")
+    scraper = BringATrailerScraper()
+    vehicles = scraper.scrape_listings()
+    _save_scraped_vehicles(vehicles, "BaT")
+
+
+def run_copart_scrape():
+    """Scrape Copart and store listings."""
+    logger.info("=== Starting Copart scrape job ===")
+    scraper = CopartScraper()
+    vehicles = scraper.scrape_listings()
+    _save_scraped_vehicles(vehicles, "Copart")
+
+
+def run_cars_and_bids_scrape():
+    """Scrape Cars & Bids and store listings."""
+    logger.info("=== Starting Cars & Bids scrape job ===")
+    scraper = CarsAndBidsScraper()
+    vehicles = scraper.scrape_listings()
+    _save_scraped_vehicles(vehicles, "CarsAndBids")
+
+
+def run_hemmings_scrape():
+    """Scrape Hemmings and store listings."""
+    logger.info("=== Starting Hemmings scrape job ===")
+    scraper = HemmingsScraper()
+    vehicles = scraper.scrape_listings()
+    _save_scraped_vehicles(vehicles, "Hemmings")
 
 
 def run_fipe_enrichment():
@@ -258,8 +295,10 @@ def run_alerts():
     logger.info("=== Starting alerts job ===")
     settings = load_settings()
     min_score = settings.get("alerts", {}).get("telegram", {}).get("min_score", 60)
+    email_min_score = settings.get("alerts", {}).get("email", {}).get("min_score", 70)
 
     telegram = TelegramNotifier()
+    email = EmailSender()
     sheets = SheetsSync()
     session = get_session()
 
@@ -268,7 +307,7 @@ def run_alerts():
         deals = session.execute(
             select(Deal).where(
                 Deal.is_active == True,  # noqa: E712
-                Deal.score >= min_score,
+                Deal.score >= min(min_score, email_min_score),
             ).order_by(Deal.score.desc())
         ).scalars().all()
 
@@ -280,15 +319,27 @@ def run_alerts():
 
         # Send individual alerts for new deals (not yet alerted)
         for deal, vehicle in deals_with_vehicles:
-            already_alerted = session.execute(
-                select(AlertLog).where(
-                    AlertLog.deal_id == deal.id,
-                    AlertLog.channel == "telegram",
-                )
-            ).scalar_one_or_none()
+            # Telegram alerts
+            if deal.score >= min_score:
+                already_telegrammed = session.execute(
+                    select(AlertLog).where(
+                        AlertLog.deal_id == deal.id,
+                        AlertLog.channel == "telegram",
+                    )
+                ).scalar_one_or_none()
+                if not already_telegrammed:
+                    telegram.send_deal_alert(deal, vehicle)
 
-            if not already_alerted:
-                telegram.send_deal_alert(deal, vehicle)
+            # Email instant alerts for high-score deals
+            if deal.score >= email_min_score:
+                already_emailed = session.execute(
+                    select(AlertLog).where(
+                        AlertLog.deal_id == deal.id,
+                        AlertLog.channel == "email",
+                    )
+                ).scalar_one_or_none()
+                if not already_emailed:
+                    email.send_deal_alert(deal, vehicle)
 
         # Sync all active deals to Google Sheets
         all_active_deals = session.execute(
@@ -310,6 +361,33 @@ def run_alerts():
         session.close()
 
 
+def run_daily_digest():
+    """Send daily email digest with top deals."""
+    logger.info("=== Starting daily digest ===")
+    email = EmailSender()
+    session = get_session()
+
+    try:
+        deals = session.execute(
+            select(Deal).where(
+                Deal.is_active == True,  # noqa: E712
+            ).order_by(Deal.score.desc()).limit(20)
+        ).scalars().all()
+
+        deals_with_vehicles = []
+        for deal in deals:
+            vehicle = session.get(Vehicle, deal.vehicle_id)
+            if vehicle:
+                deals_with_vehicles.append((deal, vehicle))
+
+        email.send_daily_digest(deals_with_vehicles)
+        logger.info(f"Daily digest sent with {len(deals_with_vehicles)} deals")
+    except Exception as e:
+        logger.error(f"Error sending daily digest: {e}")
+    finally:
+        session.close()
+
+
 def run_full_pipeline():
     """Run the complete pipeline: scrape -> enrich -> score -> alert."""
     logger.info("========================================")
@@ -317,11 +395,20 @@ def run_full_pipeline():
     logger.info("========================================")
 
     init_db()
+
+    # Scrape all US auction sources
     run_bat_scrape()
+    run_copart_scrape()
+    run_cars_and_bids_scrape()
+    run_hemmings_scrape()
+
+    # Record price history and enrich with BR data
     run_price_history_recording()
     run_fipe_enrichment()
     run_br_market_scrape()
     run_br_market_enrichment()
+
+    # Score and alert
     run_deal_scoring()
     run_alerts()
 

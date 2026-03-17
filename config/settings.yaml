@@ -35,12 +35,23 @@ alerts:
     enabled: true
     spreadsheet_name: "Car Auction Deals"
   email:
-    enabled: false
+    enabled: true
+    min_score: 70
+    daily_digest_hour: 8
 
 scraping:
   bring_a_trailer:
     interval_minutes: 15
     base_url: "https://bringatrailer.com"
+  copart:
+    interval_minutes: 30
+    max_pages: 5
+  cars_and_bids:
+    max_pages: 3
+  hemmings:
+    max_pages: 3
+  secondary_sources:
+    interval_minutes: 60
   br_market:
     interval_hours: 4
     webmotors_enabled: true
