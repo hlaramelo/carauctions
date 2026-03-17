@@ -18,8 +18,11 @@ from loguru import logger
 from models.database import init_db
 from scheduler import (
     run_bat_scrape,
+    run_br_market_scrape,
+    run_br_market_enrichment,
     run_deal_scoring,
     run_fipe_enrichment,
+    run_price_history_recording,
     run_alerts,
     run_full_pipeline,
 )
@@ -57,11 +60,34 @@ def run_scheduled():
 
     sched = BlockingScheduler()
 
+    br_market_interval = (
+        settings.get("scraping", {})
+        .get("br_market", {})
+        .get("interval_hours", 4)
+    )
+
     # BaT scraping every N minutes
     sched.add_job(run_bat_scrape, "interval", minutes=bat_interval, id="bat_scrape")
 
+    # Record price history after each scrape
+    sched.add_job(
+        run_price_history_recording, "interval", minutes=bat_interval, id="price_history",
+        start_date="2024-01-01 00:01:00",
+    )
+
     # FIPE enrichment every 2 hours
     sched.add_job(run_fipe_enrichment, "interval", hours=2, id="fipe_enrichment")
+
+    # BR market scrape (Webmotors + OLX) every N hours
+    sched.add_job(
+        run_br_market_scrape, "interval", hours=br_market_interval, id="br_market_scrape",
+    )
+
+    # BR market enrichment (aggregate prices, create snapshots)
+    sched.add_job(
+        run_br_market_enrichment, "interval", hours=br_market_interval, id="br_market_enrichment",
+        start_date="2024-01-01 00:10:00",
+    )
 
     # Deal scoring after each scrape cycle (every N minutes, offset by 2 min)
     sched.add_job(
@@ -74,7 +100,10 @@ def run_scheduled():
 
     logger.info("Scheduler started. Press Ctrl+C to exit.")
     logger.info(f"  BaT scrape: every {bat_interval} min")
+    logger.info("  Price history recording: after each scrape")
     logger.info("  FIPE enrichment: every 2 hours")
+    logger.info(f"  BR market scrape: every {br_market_interval} hours")
+    logger.info(f"  BR market enrichment: every {br_market_interval} hours")
     logger.info(f"  Deal scoring: every {bat_interval} min")
     logger.info("  Alerts: every 30 min")
 
@@ -110,7 +139,10 @@ def main():
     elif args.scrape:
         init_db()
         run_bat_scrape()
+        run_price_history_recording()
         run_fipe_enrichment()
+        run_br_market_scrape()
+        run_br_market_enrichment()
     elif args.score:
         run_deal_scoring()
     elif args.alerts:

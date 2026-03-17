@@ -41,6 +41,12 @@ scraping:
   bring_a_trailer:
     interval_minutes: 15
     base_url: "https://bringatrailer.com"
+  br_market:
+    interval_hours: 4
+    webmotors_enabled: true
+    olx_enabled: true
+    max_pages_webmotors: 5
+    max_pages_olx: 3
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
   request_delay_seconds: 2
 

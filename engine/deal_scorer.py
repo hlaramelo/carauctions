@@ -8,6 +8,7 @@ from loguru import logger
 from config import load_settings
 from engine.cost_calculator import ImportCostCalculator
 from engine.currency import get_usd_brl_rate
+from engine.price_history import PriceHistoryEngine
 from models.vehicle import Vehicle
 from models.deal import Deal
 
@@ -20,6 +21,7 @@ class DealScorer:
         self.weights = settings["scoring"]["weights"]
         self.filters = settings["filters"]
         self.calculator = ImportCostCalculator()
+        self.price_history = PriceHistoryEngine()
 
     def passes_filters(self, vehicle: Vehicle) -> bool:
         """Check if a vehicle passes the configured filters."""
@@ -55,7 +57,8 @@ class DealScorer:
         if not auction_price:
             return None
 
-        br_price = vehicle.fipe_price_brl or vehicle.br_price_avg
+        # Prefer real market avg (Webmotors/OLX) over FIPE reference
+        br_price = vehicle.br_price_avg or vehicle.fipe_price_brl
         if not br_price:
             logger.debug(f"No BR price data for {vehicle}, skipping scoring")
             return None
@@ -90,8 +93,8 @@ class DealScorer:
         # 4. Time remaining score (0-100)
         scores["time_remaining"] = self._score_time_remaining(vehicle)
 
-        # 5. Price history score (0-100) - simplified for MVP
-        scores["price_history"] = 50  # Neutral default until we have history data
+        # 5. Price history score (0-100) - based on auction bid trends
+        scores["price_history"] = self.price_history.score_price_history(vehicle.id)
 
         # Weighted total
         total_score = sum(

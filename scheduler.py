@@ -5,6 +5,8 @@ from sqlalchemy import select
 
 from config import load_settings
 from engine.deal_scorer import DealScorer
+from engine.price_history import PriceHistoryEngine, BRMarketAnalyzer
+from models.br_listing import BRMarketListing
 from models.database import get_session, init_db
 from models.deal import Deal, AlertLog
 from models.vehicle import Vehicle
@@ -12,6 +14,8 @@ from notifications.sheets_sync import SheetsSync
 from notifications.telegram_bot import TelegramNotifier
 from scrapers.bring_a_trailer import BringATrailerScraper
 from scrapers.br_market.fipe import FipeClient
+from scrapers.br_market.webmotors import WebmotorsScraper
+from scrapers.br_market.olx import OLXScraper
 
 
 def run_bat_scrape():
@@ -141,6 +145,114 @@ def run_deal_scoring():
         session.close()
 
 
+def run_br_market_scrape():
+    """Scrape Brazilian marketplaces (Webmotors + OLX) for real market prices."""
+    logger.info("=== Starting BR market scrape job ===")
+    webmotors = WebmotorsScraper()
+    olx = OLXScraper()
+    session = get_session()
+
+    try:
+        # Get unique make/model/year combos from active vehicles
+        vehicles = session.execute(
+            select(Vehicle).where(Vehicle.is_active == True)  # noqa: E712
+        ).scalars().all()
+
+        seen_specs = set()
+        total_new = 0
+
+        for vehicle in vehicles:
+            if not vehicle.make or not vehicle.model or not vehicle.year:
+                continue
+
+            spec_key = (vehicle.make.lower(), vehicle.model.lower().split()[0], vehicle.year)
+            if spec_key in seen_specs:
+                continue
+            seen_specs.add(spec_key)
+
+            # Scrape Webmotors
+            try:
+                wm_listings = webmotors.scrape_for_vehicle(vehicle.make, vehicle.model, vehicle.year)
+                for data in wm_listings:
+                    existing = session.execute(
+                        select(BRMarketListing).where(
+                            BRMarketListing.source_id == data["source_id"]
+                        )
+                    ).scalar_one_or_none()
+                    if not existing:
+                        listing = BRMarketListing(**data)
+                        session.add(listing)
+                        total_new += 1
+            except Exception as e:
+                logger.error(f"Webmotors scrape failed for {vehicle.make} {vehicle.model}: {e}")
+
+            # Scrape OLX
+            try:
+                olx_listings = olx.scrape_for_vehicle(vehicle.make, vehicle.model, vehicle.year)
+                for data in olx_listings:
+                    existing = session.execute(
+                        select(BRMarketListing).where(
+                            BRMarketListing.source_id == data["source_id"]
+                        )
+                    ).scalar_one_or_none()
+                    if not existing:
+                        listing = BRMarketListing(**data)
+                        session.add(listing)
+                        total_new += 1
+            except Exception as e:
+                logger.error(f"OLX scrape failed for {vehicle.make} {vehicle.model}: {e}")
+
+        session.commit()
+        logger.info(f"BR market scrape complete: {total_new} new listings from {len(seen_specs)} vehicle specs")
+    except Exception as e:
+        logger.error(f"Error in BR market scrape: {e}")
+        session.rollback()
+    finally:
+        session.close()
+
+
+def run_br_market_enrichment():
+    """Enrich vehicles with real market prices and create price snapshots."""
+    logger.info("=== Starting BR market enrichment job ===")
+    analyzer = BRMarketAnalyzer()
+    session = get_session()
+
+    try:
+        vehicles = session.execute(
+            select(Vehicle).where(Vehicle.is_active == True)  # noqa: E712
+        ).scalars().all()
+
+        enriched = 0
+        snapshots = 0
+
+        for vehicle in vehicles:
+            if not vehicle.make or not vehicle.model or not vehicle.year:
+                continue
+
+            # Update vehicle with market price data
+            if analyzer.enrich_vehicle_with_market_data(vehicle):
+                enriched += 1
+
+            # Create price snapshot for trend tracking
+            snapshot = analyzer.create_price_snapshot(vehicle.make, vehicle.model, vehicle.year)
+            if snapshot:
+                snapshots += 1
+
+        logger.info(f"BR market enrichment: {enriched} vehicles enriched, {snapshots} snapshots created")
+    except Exception as e:
+        logger.error(f"Error in BR market enrichment: {e}")
+    finally:
+        session.close()
+
+
+def run_price_history_recording():
+    """Record current auction prices for trend tracking."""
+    logger.info("=== Starting price history recording ===")
+    engine = PriceHistoryEngine()
+    count = engine.record_all_active_prices()
+    logger.info(f"Price history: {count} new price points recorded")
+
+
 def run_alerts():
     """Send alerts for high-scoring deals that haven't been alerted yet."""
     logger.info("=== Starting alerts job ===")
@@ -206,7 +318,10 @@ def run_full_pipeline():
 
     init_db()
     run_bat_scrape()
+    run_price_history_recording()
     run_fipe_enrichment()
+    run_br_market_scrape()
+    run_br_market_enrichment()
     run_deal_scoring()
     run_alerts()
 
