@@ -7,3 +7,6 @@ __pycache__/
 venv/
 dist/
 *.egg-info/
+logs/
+credentials.json
+*.credentials.json

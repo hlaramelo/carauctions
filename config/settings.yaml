@@ -1,0 +1,49 @@
+# Car Auction Deal Finder - Settings
+
+filters:
+  min_year: 2018
+  max_mileage: 50000
+  title_status: ["clean", "rebuilt"]
+  min_margin_pct: 15
+  max_auction_price_usd: 200000
+  makes:
+    - Porsche
+    - BMW
+    - Mercedes-Benz
+    - Ferrari
+    - Lamborghini
+    - Audi
+    - McLaren
+    - Aston Martin
+    - Bentley
+    - Maserati
+  exclude_states: ["HI", "AK"]
+
+scoring:
+  weights:
+    margin: 0.40
+    liquidity: 0.20
+    condition: 0.15
+    time_remaining: 0.15
+    price_history: 0.10
+
+alerts:
+  telegram:
+    min_score: 60
+    enabled: true
+  sheets:
+    enabled: true
+    spreadsheet_name: "Car Auction Deals"
+  email:
+    enabled: false
+
+scraping:
+  bring_a_trailer:
+    interval_minutes: 15
+    base_url: "https://bringatrailer.com"
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  request_delay_seconds: 2
+
+currency:
+  default_usd_brl: 5.0
+  update_interval_hours: 6
