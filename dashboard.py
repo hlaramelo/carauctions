@@ -14,6 +14,7 @@ from models.vehicle import Vehicle, PriceHistory
 from models.br_listing import BRMarketListing, BRPriceSnapshot
 from models.watchlist import WatchlistItem
 from engine.price_history import BRMarketAnalyzer
+from engine.currency import get_usd_brl_rate
 
 init_db()
 
@@ -185,6 +186,11 @@ if page == "Dashboard":
     col5, col6, col7, col8 = st.columns(4)
     col5.metric("Listings BR", stats["br_listings"])
     col6.metric("Watchlist", stats["watchlist"])
+    try:
+        usd_brl = get_usd_brl_rate()
+        col7.metric("USD/BRL (BCB)", f"R$ {usd_brl:.4f}")
+    except Exception:
+        col7.metric("USD/BRL (BCB)", "Indisponivel")
 
     st.subheader("Veiculos por Fonte")
     if stats["sources"]:

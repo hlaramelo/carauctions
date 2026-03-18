@@ -62,5 +62,5 @@ scraping:
   request_delay_seconds: 2
 
 currency:
-  default_usd_brl: 5.0
+  default_usd_brl: 5.85
   update_interval_hours: 6

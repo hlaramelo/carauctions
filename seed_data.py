@@ -7,6 +7,7 @@ from models.database import init_db, get_session
 from models.vehicle import Vehicle, PriceHistory
 from models.deal import Deal
 from models.br_listing import BRMarketListing, BRPriceSnapshot
+from engine.currency import get_usd_brl_rate
 
 init_db()
 
@@ -185,8 +186,8 @@ VEHICLES = [
     },
 ]
 
-# USD/BRL rate
-USD_BRL = 5.85
+# USD/BRL rate from BCB (Banco Central do Brasil)
+USD_BRL = get_usd_brl_rate()
 
 # Cost assumptions for importing to Brazil
 SHIPPING_USD = 3500
