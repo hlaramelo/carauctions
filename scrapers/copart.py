@@ -2,13 +2,16 @@
 
 Copart uses a dynamic JS frontend, so we rely on their search API
 which the frontend calls. This avoids needing Selenium/Playwright.
+Falls back to HTML parsing when API is blocked (403).
 """
 
+import json
 import re
 import time
 from datetime import datetime, timezone
 
 import requests
+from bs4 import BeautifulSoup
 from loguru import logger
 
 from config import load_settings
@@ -81,11 +84,172 @@ class CopartScraper(BaseScraper):
         except ValueError:
             logger.error("[Copart] Invalid JSON from detail API")
 
-        # Fallback: try to parse info from the URL slug itself
+        # Fallback 2: try HTML scraping
+        try:
+            logger.info("[Copart] Trying HTML scraping fallback...")
+            time.sleep(self.request_delay)
+            html_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            }
+            resp = requests.get(url, headers=html_headers, timeout=15)
+            if resp.status_code == 200:
+                vehicle = self._parse_from_html(resp.text, lot_number, url)
+                if vehicle:
+                    logger.info(f"[Copart] HTML parsed: {vehicle.year} {vehicle.make} {vehicle.model} bid=${vehicle.current_bid_usd}")
+                    return vehicle
+        except Exception as e:
+            logger.warning(f"[Copart] HTML scraping failed: {e}")
+
+        # Fallback 3: parse info from the URL slug itself
         vehicle = self._parse_from_url(url, lot_number)
         if vehicle:
             logger.info(f"[Copart] Parsed from URL: {vehicle.year} {vehicle.make} {vehicle.model}")
         return vehicle
+
+    def _parse_from_html(self, html: str, lot_number: str, url: str) -> Vehicle | None:
+        """Parse vehicle data from Copart HTML page."""
+        try:
+            soup = BeautifulSoup(html, "lxml")
+
+            # Try to find JSON-LD or embedded lot data in script tags
+            for script in soup.find_all("script"):
+                text = script.string or ""
+                # Look for lot data in JavaScript variables
+                lot_json_match = re.search(r'lotDetails\s*[=:]\s*({.+?});', text, re.DOTALL)
+                if lot_json_match:
+                    try:
+                        lot_data = json.loads(lot_json_match.group(1))
+                        return self._parse_result(lot_data)
+                    except (json.JSONDecodeError, Exception):
+                        pass
+
+                # Look for JSON-LD structured data
+                if '"@type"' in text and '"Vehicle"' in text:
+                    try:
+                        ld_data = json.loads(text)
+                        if isinstance(ld_data, list):
+                            ld_data = ld_data[0]
+                        # Extract from schema.org Vehicle format
+                        name = ld_data.get("name", "")
+                        year_m = re.search(r"(\d{4})", name)
+                        if year_m:
+                            year = int(year_m.group(1))
+                            rest = name.replace(year_m.group(1), "").strip()
+                            parts = rest.split(None, 1)
+                            make = parts[0] if parts else ""
+                            model = parts[1] if len(parts) > 1 else ""
+                            bid = None
+                            offers = ld_data.get("offers", {})
+                            if offers:
+                                bid = offers.get("price")
+                            return Vehicle(
+                                source=self.SOURCE_NAME,
+                                source_id=f"copart_{lot_number}",
+                                url=url,
+                                make=make.title(),
+                                model=model.title(),
+                                year=year,
+                                current_bid_usd=float(bid) if bid else None,
+                            )
+                    except (json.JSONDecodeError, Exception):
+                        pass
+
+            # Direct HTML element parsing
+            title_el = soup.find("h1") or soup.find("title")
+            title_text = title_el.get_text(strip=True) if title_el else ""
+
+            year_m = re.search(r"(\d{4})", title_text)
+            year = int(year_m.group(1)) if year_m else None
+
+            # Extract bid from page
+            current_bid = None
+            bid_el = soup.find(string=re.compile(r"Current bid", re.I))
+            if bid_el:
+                parent = bid_el.find_parent()
+                if parent:
+                    price_text = parent.find_next(string=re.compile(r"\$[\d,]+"))
+                    if price_text:
+                        price_clean = re.sub(r"[^\d.]", "", price_text)
+                        if price_clean:
+                            current_bid = float(price_clean)
+
+            # Also try meta tags for price
+            if not current_bid:
+                price_meta = soup.find("meta", {"property": "product:price:amount"})
+                if price_meta:
+                    try:
+                        current_bid = float(price_meta.get("content", 0))
+                    except (ValueError, TypeError):
+                        pass
+
+            # Extract mileage
+            mileage = None
+            odo_el = soup.find(string=re.compile(r"Odometer", re.I))
+            if odo_el:
+                parent = odo_el.find_parent()
+                if parent:
+                    val_el = parent.find_next(string=re.compile(r"[\d,]+"))
+                    if val_el:
+                        mileage = self._parse_mileage(val_el.strip())
+
+            # Extract damage
+            damage = None
+            dmg_el = soup.find(string=re.compile(r"Primary damage", re.I))
+            if dmg_el:
+                parent = dmg_el.find_parent()
+                if parent:
+                    val_el = parent.find_next_sibling() or parent.find_next()
+                    if val_el:
+                        damage = val_el.get_text(strip=True)
+
+            # Extract location from sale name
+            location_state = None
+            location_city = None
+            sale_el = soup.find(string=re.compile(r"Sale name", re.I))
+            if sale_el:
+                parent = sale_el.find_parent()
+                if parent:
+                    val_el = parent.find_next(string=re.compile(r"\w{2}\s*-\s*\w+"))
+                    if val_el:
+                        loc_match = re.search(r"(\w{2})\s*-\s*(.+)", val_el.strip())
+                        if loc_match:
+                            location_state = loc_match.group(1).upper()
+                            location_city = loc_match.group(2).strip().title()
+
+            # Parse make/model from title
+            make, model = "", ""
+            if year and title_text:
+                after_year = title_text.split(str(year), 1)[-1].strip()
+                parts = after_year.split(None, 1)
+                if parts:
+                    make = parts[0]
+                    model = parts[1] if len(parts) > 1 else ""
+
+            # If we got at least year and make, return
+            if year and make:
+                # Get URL-based fallback data for anything missing
+                url_vehicle = self._parse_from_url(url, lot_number)
+                return Vehicle(
+                    source=self.SOURCE_NAME,
+                    source_id=f"copart_{lot_number}",
+                    url=url,
+                    make=make.title(),
+                    model=model.title() if model else (url_vehicle.model if url_vehicle else ""),
+                    year=year,
+                    current_bid_usd=current_bid,
+                    mileage=mileage,
+                    damage_description=damage,
+                    title_status=url_vehicle.title_status if url_vehicle else "unknown",
+                    location_state=location_state or (url_vehicle.location_state if url_vehicle else None),
+                    location_city=location_city,
+                )
+
+        except Exception as e:
+            logger.warning(f"[Copart] HTML parsing error: {e}")
+
+        return None
 
     def _parse_from_url(self, url: str, lot_number: str) -> Vehicle | None:
         """Fallback: extract basic info from URL slug when API fails."""

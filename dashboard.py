@@ -332,6 +332,18 @@ def force_fetch_auction(auction):
                 existing_v.mileage = vehicle.mileage
             if vehicle.damage_description:
                 existing_v.damage_description = vehicle.damage_description
+            if vehicle.location_state:
+                existing_v.location_state = vehicle.location_state
+            if vehicle.location_city:
+                existing_v.location_city = vehicle.location_city
+            if vehicle.vin:
+                existing_v.vin = vehicle.vin
+            if vehicle.engine_cc:
+                existing_v.engine_cc = vehicle.engine_cc
+            if vehicle.trim:
+                existing_v.trim = vehicle.trim
+            if vehicle.image_urls:
+                existing_v.image_urls = vehicle.image_urls
             existing_v.is_active = True
             vehicle = existing_v
         else:
@@ -340,6 +352,15 @@ def force_fetch_auction(auction):
 
         auction.vehicle_id = vehicle.id
         auction.last_checked_at = datetime.now(timezone.utc)
+
+        # Record price history if we have a bid
+        if vehicle.current_bid_usd and vehicle.current_bid_usd > 0:
+            session.add(PriceHistory(
+                vehicle_id=vehicle.id,
+                price_usd=vehicle.current_bid_usd,
+                recorded_at=datetime.now(timezone.utc),
+            ))
+
         session.commit()
 
         return True, (
