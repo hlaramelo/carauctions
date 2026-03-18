@@ -307,6 +307,21 @@ class CopartScraper(BaseScraper):
                         from datetime import timedelta
                         auction_end = datetime.now(timezone.utc) + timedelta(days=days, hours=hours, minutes=mins)
 
+            # Images - grab from page and Copart CDN
+            image_list = []
+            # Try page images first
+            for img in soup.find_all("img"):
+                src = img.get("src", "") or img.get("data-src", "")
+                if src and ("cs.copart.com" in src or "cdnimg" in src) and "lot" in src.lower():
+                    if src not in image_list:
+                        image_list.append(src)
+            # Fallback: Copart CDN pattern
+            if not image_list:
+                for i in range(1, 6):
+                    image_list.append(
+                        f"https://cs.copart.com/v1/AUTH_svc.pdoc00001/{lot_number}/{i}.jpg"
+                    )
+
             # Fallback: get URL-based data for anything missing
             url_vehicle = self._parse_from_url(url, lot_number)
 
@@ -320,7 +335,7 @@ class CopartScraper(BaseScraper):
 
             logger.debug(
                 f"[Copart/Selenium] Extracted: bid={current_bid}, mi={mileage}, "
-                f"damage={damage}, loc={location_state}, vin={vin}"
+                f"damage={damage}, loc={location_state}, vin={vin}, images={len(image_list)}"
             )
 
             return Vehicle(
@@ -340,6 +355,7 @@ class CopartScraper(BaseScraper):
                 location_city=location_city,
                 engine_cc=engine_cc,
                 auction_end=auction_end,
+                image_urls=json.dumps(image_list) if image_list else None,
             )
         except Exception as e:
             logger.error(f"[Copart] Selenium error: {e}")

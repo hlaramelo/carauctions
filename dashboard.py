@@ -813,92 +813,144 @@ elif page == "Monitorados":
                     car_label = f"{vehicle.year} {vehicle.make} {vehicle.model}"
                     if vehicle.trim:
                         car_label += f" {vehicle.trim}"
-                    label = f"[{a.source}] {car_label}"
+                    label = f"[{a.source.upper()}] {car_label} — ${vehicle.current_bid_usd or 0:,.0f}"
                     with st.expander(label):
-                        col_btn, col_link, col_remove = st.columns([1, 2, 1])
-                        with col_btn:
-                            if st.button("Atualizar", key=f"fetch_{a.id}"):
-                                with st.spinner("Buscando dados..."):
-                                    ok, msg = force_fetch_auction(a)
-                                if ok:
-                                    st.success(msg)
-                                    st.rerun()
-                                else:
-                                    st.error(msg)
-                        with col_link:
-                            st.markdown(f"[Abrir no {a.source.title()}]({vehicle.url})")
-                        with col_remove:
-                            if st.button("Remover", key=f"remove_{a.id}", type="secondary"):
-                                _remove_auction(a.id)
-                                st.rerun()
+                        # --- Top row: photo + key metrics ---
+                        img_col, info_col = st.columns([1, 2])
 
-                        analysis = monitor_engine.analyze(vehicle)
-                        has_end = vehicle.auction_end is not None
-                        tempo = MonitorEngine.format_time_remaining(
-                            analysis.get("tempo_restante_s"), has_auction_end=has_end
-                        )
-
-                        col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("Bid Atual", f"${vehicle.current_bid_usd or 0:,.0f}")
-                        col2.metric("Km", f"{vehicle.mileage:,} mi" if vehicle.mileage else "—")
-                        col3.metric("Titulo", vehicle.title_status or "—")
-                        col4.metric("Tempo", tempo)
-
-                        if vehicle.damage_description:
-                            st.write(f"**Dano:** {vehicle.damage_description}")
-                        if vehicle.location_city or vehicle.location_state:
-                            loc = f"{vehicle.location_city or ''}, {vehicle.location_state or ''}".strip(", ")
-                            st.write(f"**Local:** {loc}")
-                        if vehicle.vin:
-                            st.write(f"**VIN:** {vehicle.vin}")
-
-                        # Manual edit form
-                        st.divider()
-                        st.write("**Editar dados manualmente:**")
-                        with st.form(key=f"edit_{a.id}"):
-                            ecol1, ecol2, ecol3 = st.columns(3)
-                            new_bid = ecol1.number_input(
-                                "Bid (USD)", value=float(vehicle.current_bid_usd or 0),
-                                min_value=0.0, step=50.0, key=f"bid_{a.id}"
-                            )
-                            new_mileage = ecol2.number_input(
-                                "Milhas", value=int(vehicle.mileage or 0),
-                                min_value=0, step=1000, key=f"mi_{a.id}"
-                            )
-                            new_damage = ecol3.text_input(
-                                "Dano", value=vehicle.damage_description or "",
-                                key=f"dmg_{a.id}"
-                            )
-                            ecol4, ecol5, ecol6 = st.columns(3)
-                            new_location = ecol4.text_input(
-                                "Local (ex: PA - Philadelphia)",
-                                value=f"{vehicle.location_state or ''} - {vehicle.location_city or ''}".strip(" -"),
-                                key=f"loc_{a.id}"
-                            )
-                            new_vin = ecol5.text_input(
-                                "VIN", value=vehicle.vin or "", key=f"vin_{a.id}"
-                            )
-                            new_engine = ecol6.text_input(
-                                "Motor (ex: 5.5L)",
-                                value=f"{vehicle.engine_cc/1000:.1f}L" if vehicle.engine_cc else "",
-                                key=f"eng_{a.id}"
-                            )
-                            if st.form_submit_button("Salvar"):
-                                _save_manual_edit(
-                                    vehicle.id, new_bid, new_mileage, new_damage,
-                                    new_location, new_vin, new_engine
+                        with img_col:
+                            # Show vehicle photo if available
+                            images = []
+                            if vehicle.image_urls:
+                                try:
+                                    images = json.loads(vehicle.image_urls) if isinstance(vehicle.image_urls, str) else vehicle.image_urls
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
+                            if images and len(images) > 0:
+                                st.image(images[0], use_container_width=True)
+                            else:
+                                st.markdown(
+                                    f'<div style="background:#1a1a2e;border-radius:8px;padding:40px;text-align:center;color:#555">'
+                                    f'<br>Sem foto<br><br></div>',
+                                    unsafe_allow_html=True,
                                 )
-                                st.success("Dados atualizados!")
-                                st.rerun()
 
-                        # Price history
+                        with info_col:
+                            analysis = monitor_engine.analyze(vehicle)
+                            has_end = vehicle.auction_end is not None
+                            tempo = MonitorEngine.format_time_remaining(
+                                analysis.get("tempo_restante_s"), has_auction_end=has_end
+                            )
+
+                            # Vehicle info header
+                            st.markdown(f"### {car_label}")
+                            if vehicle.engine_cc:
+                                st.caption(f"Motor: {vehicle.engine_cc/1000:.1f}L | {vehicle.title_status or 'N/A'} title")
+                            col_btn, col_link, col_remove = st.columns([1, 2, 1])
+                            with col_btn:
+                                if st.button("Atualizar", key=f"fetch_{a.id}"):
+                                    with st.spinner("Buscando dados..."):
+                                        ok, msg = force_fetch_auction(a)
+                                    if ok:
+                                        st.success(msg)
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                            with col_link:
+                                st.markdown(f"[Abrir no {a.source.title()}]({vehicle.url})")
+                            with col_remove:
+                                if st.button("Remover", key=f"remove_{a.id}", type="secondary"):
+                                    _remove_auction(a.id)
+                                    st.rerun()
+
+                        # --- Auction metrics row ---
+                        st.divider()
+                        m1, m2, m3, m4, m5 = st.columns(5)
+                        m1.metric("Bid Atual", f"${vehicle.current_bid_usd or 0:,.0f}")
+                        m2.metric("Milhas", f"{vehicle.mileage:,}" if vehicle.mileage else "—")
+                        m3.metric("Titulo", (vehicle.title_status or "—").title())
+                        m4.metric("Tempo", tempo)
+                        m5.metric("Cambio", f"R$ {analysis.get('usd_brl_rate', 0):.2f}" if analysis else "—")
+
+                        # --- Profit analysis ---
+                        if analysis and analysis.get("custo_total_brl"):
+                            st.divider()
+                            st.markdown("#### Analise de Importacao")
+                            p1, p2, p3, p4 = st.columns(4)
+                            custo = analysis["custo_total_brl"]
+                            p1.metric("Custo Total BR", f"R$ {custo:,.0f}")
+
+                            venda = analysis.get("venda_estimada_brl")
+                            if venda:
+                                p2.metric("Venda Estimada", f"R$ {venda:,.0f}")
+                                lucro = analysis.get("lucro_brl", 0)
+                                margem = analysis.get("margem_pct", 0)
+                                delta_color = "normal" if lucro and lucro > 0 else "inverse"
+                                p3.metric(
+                                    "Lucro Estimado",
+                                    f"R$ {lucro:,.0f}" if lucro else "—",
+                                    delta=f"{margem:.1f}%" if margem else None,
+                                    delta_color=delta_color,
+                                )
+                                # Verdict
+                                if margem and margem > 20:
+                                    p4.metric("Veredicto", "Excelente")
+                                    p4.success("Margem alta!")
+                                elif margem and margem > 10:
+                                    p4.metric("Veredicto", "Bom")
+                                    p4.info("Margem positiva")
+                                elif margem and margem > 0:
+                                    p4.metric("Veredicto", "Apertado")
+                                    p4.warning("Margem baixa")
+                                else:
+                                    p4.metric("Veredicto", "Prejuizo")
+                                    p4.error("Sem margem")
+                            else:
+                                p2.metric("Venda Estimada", "Sem dados BR")
+                                p3.metric("Lucro Estimado", "—")
+                                p4.info("Adicione dados do mercado BR para calcular lucro")
+
+                            # Cost breakdown expander
+                            with st.expander("Ver decomposicao de custos"):
+                                bc1, bc2, bc3 = st.columns(3)
+                                bc1.write(f"**Leilao:** ${vehicle.current_bid_usd or 0:,.0f}")
+                                bc1.write(f"**CIF (BRL):** R$ {analysis.get('cif_brl', 0):,.0f}")
+                                bc2.write(f"**Impostos:** R$ {analysis.get('total_taxes_brl', 0):,.0f}")
+                                bc2.write(f"**Cambio:** R$ {analysis.get('usd_brl_rate', 0):.2f}")
+                                bc3.write(f"**Custo Total:** R$ {custo:,.0f}")
+                                if venda:
+                                    bc3.write(f"**Venda Est.:** R$ {venda:,.0f}")
+
+                        # --- Vehicle details ---
+                        st.divider()
+                        d1, d2 = st.columns(2)
+                        with d1:
+                            if vehicle.damage_description:
+                                st.write(f"**Dano:** {vehicle.damage_description}")
+                            if vehicle.location_city or vehicle.location_state:
+                                loc = f"{vehicle.location_city or ''}, {vehicle.location_state or ''}".strip(", ")
+                                st.write(f"**Local:** {loc}")
+                        with d2:
+                            if vehicle.vin:
+                                st.write(f"**VIN:** `{vehicle.vin}`")
+                            if vehicle.engine_cc:
+                                st.write(f"**Motor:** {vehicle.engine_cc/1000:.1f}L ({vehicle.engine_cc}cc)")
+
+                        # --- Photo gallery ---
+                        if images and len(images) > 1:
+                            with st.expander(f"Galeria de fotos ({len(images)})"):
+                                gallery_cols = st.columns(min(4, len(images) - 1))
+                                for idx, img_url in enumerate(images[1:5]):  # Show up to 4 more
+                                    with gallery_cols[idx % len(gallery_cols)]:
+                                        st.image(img_url, use_container_width=True)
+
+                        # --- Price history ---
                         st.divider()
                         history = get_price_history(vehicle.id)
                         if history and len(history) >= 2:
-                            st.write("**Historico de Bids:**")
+                            st.markdown("#### Historico de Bids")
                             hist_df = pd.DataFrame(history)
                             st.line_chart(hist_df.set_index("timestamp")["price"])
-                            # Show table of recorded bids
                             with st.expander(f"Ver {len(history)} registos"):
                                 tbl = pd.DataFrame(history)
                                 tbl.columns = ["Data/Hora", "Bid (USD)"]
@@ -909,10 +961,48 @@ elif page == "Monitorados":
                             st.info(
                                 f"1 registo de bid: **${history[0]['price']:,.0f}** "
                                 f"em {history[0]['timestamp'].strftime('%d/%m %H:%M') if hasattr(history[0]['timestamp'], 'strftime') else history[0]['timestamp']}. "
-                                "Faca mais fetches para ver a evolucao do preco."
+                                "Faca mais fetches para ver a evolucao."
                             )
                         else:
                             st.caption("Sem historico de bids. Clique 'Atualizar' para registar.")
+
+                        # --- Manual edit (collapsed) ---
+                        with st.expander("Editar dados manualmente"):
+                            with st.form(key=f"edit_{a.id}"):
+                                ecol1, ecol2, ecol3 = st.columns(3)
+                                new_bid = ecol1.number_input(
+                                    "Bid (USD)", value=float(vehicle.current_bid_usd or 0),
+                                    min_value=0.0, step=50.0, key=f"bid_{a.id}"
+                                )
+                                new_mileage = ecol2.number_input(
+                                    "Milhas", value=int(vehicle.mileage or 0),
+                                    min_value=0, step=1000, key=f"mi_{a.id}"
+                                )
+                                new_damage = ecol3.text_input(
+                                    "Dano", value=vehicle.damage_description or "",
+                                    key=f"dmg_{a.id}"
+                                )
+                                ecol4, ecol5, ecol6 = st.columns(3)
+                                new_location = ecol4.text_input(
+                                    "Local (ex: PA - Philadelphia)",
+                                    value=f"{vehicle.location_state or ''} - {vehicle.location_city or ''}".strip(" -"),
+                                    key=f"loc_{a.id}"
+                                )
+                                new_vin = ecol5.text_input(
+                                    "VIN", value=vehicle.vin or "", key=f"vin_{a.id}"
+                                )
+                                new_engine = ecol6.text_input(
+                                    "Motor (ex: 5.5L)",
+                                    value=f"{vehicle.engine_cc/1000:.1f}L" if vehicle.engine_cc else "",
+                                    key=f"eng_{a.id}"
+                                )
+                                if st.form_submit_button("Salvar"):
+                                    _save_manual_edit(
+                                        vehicle.id, new_bid, new_mileage, new_damage,
+                                        new_location, new_vin, new_engine
+                                    )
+                                    st.success("Dados atualizados!")
+                                    st.rerun()
     finally:
         session.close()
 
