@@ -284,6 +284,65 @@ def _describe_from_url(url: str) -> dict:
     return info
 
 
+def _save_manual_edit(vehicle_id, bid, mileage, damage, location, vin, engine_str):
+    """Save manually entered vehicle data."""
+    import re
+    from scrapers.copart import CopartScraper
+    session = get_session()
+    try:
+        vehicle = session.get(Vehicle, vehicle_id)
+        if not vehicle:
+            return
+        if bid and bid > 0:
+            old_bid = vehicle.current_bid_usd
+            vehicle.current_bid_usd = float(bid)
+            # Record price history if bid changed
+            if old_bid != float(bid):
+                from datetime import datetime, timezone
+                session.add(PriceHistory(
+                    vehicle_id=vehicle.id,
+                    price_usd=float(bid),
+                    recorded_at=datetime.now(timezone.utc),
+                ))
+        if mileage and mileage > 0:
+            vehicle.mileage = int(mileage)
+        if damage:
+            vehicle.damage_description = damage
+        if location:
+            # Parse "PA - Philadelphia" or "PA"
+            loc_match = re.match(r"(\w{2})\s*-?\s*(.*)", location.strip())
+            if loc_match:
+                vehicle.location_state = loc_match.group(1).upper()
+                city = loc_match.group(2).strip()
+                if city:
+                    vehicle.location_city = city
+        if vin and len(vin) == 17:
+            vehicle.vin = vin
+        if engine_str:
+            engine_match = re.search(r"(\d+\.?\d*)\s*[lL]", engine_str)
+            if engine_match:
+                vehicle.engine_cc = int(float(engine_match.group(1)) * 1000)
+        session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
+
+
+def _remove_auction(auction_id):
+    """Remove a monitored auction."""
+    session = get_session()
+    try:
+        auction = session.get(MonitoredAuction, auction_id)
+        if auction:
+            auction.is_active = False
+            session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
+
+
 def force_fetch_auction(auction):
     """Force-fetch data for a monitored auction. Returns (success, message)."""
     from datetime import datetime, timezone
@@ -756,7 +815,7 @@ elif page == "Monitorados":
                         car_label += f" {vehicle.trim}"
                     label = f"[{a.source}] {car_label}"
                     with st.expander(label):
-                        col_btn, col_link = st.columns([1, 3])
+                        col_btn, col_link, col_remove = st.columns([1, 2, 1])
                         with col_btn:
                             if st.button("Atualizar", key=f"fetch_{a.id}"):
                                 with st.spinner("Buscando dados..."):
@@ -768,6 +827,10 @@ elif page == "Monitorados":
                                     st.error(msg)
                         with col_link:
                             st.markdown(f"[Abrir no {a.source.title()}]({vehicle.url})")
+                        with col_remove:
+                            if st.button("Remover", key=f"remove_{a.id}", type="secondary"):
+                                _remove_auction(a.id)
+                                st.rerun()
 
                         analysis = monitor_engine.analyze(vehicle)
                         has_end = vehicle.auction_end is not None
@@ -788,6 +851,45 @@ elif page == "Monitorados":
                             st.write(f"**Local:** {loc}")
                         if vehicle.vin:
                             st.write(f"**VIN:** {vehicle.vin}")
+
+                        # Manual edit form
+                        st.divider()
+                        st.write("**Editar dados manualmente:**")
+                        with st.form(key=f"edit_{a.id}"):
+                            ecol1, ecol2, ecol3 = st.columns(3)
+                            new_bid = ecol1.number_input(
+                                "Bid (USD)", value=float(vehicle.current_bid_usd or 0),
+                                min_value=0.0, step=50.0, key=f"bid_{a.id}"
+                            )
+                            new_mileage = ecol2.number_input(
+                                "Milhas", value=int(vehicle.mileage or 0),
+                                min_value=0, step=1000, key=f"mi_{a.id}"
+                            )
+                            new_damage = ecol3.text_input(
+                                "Dano", value=vehicle.damage_description or "",
+                                key=f"dmg_{a.id}"
+                            )
+                            ecol4, ecol5, ecol6 = st.columns(3)
+                            new_location = ecol4.text_input(
+                                "Local (ex: PA - Philadelphia)",
+                                value=f"{vehicle.location_state or ''} - {vehicle.location_city or ''}".strip(" -"),
+                                key=f"loc_{a.id}"
+                            )
+                            new_vin = ecol5.text_input(
+                                "VIN", value=vehicle.vin or "", key=f"vin_{a.id}"
+                            )
+                            new_engine = ecol6.text_input(
+                                "Motor (ex: 5.5L)",
+                                value=f"{vehicle.engine_cc/1000:.1f}L" if vehicle.engine_cc else "",
+                                key=f"eng_{a.id}"
+                            )
+                            if st.form_submit_button("Salvar"):
+                                _save_manual_edit(
+                                    vehicle.id, new_bid, new_mileage, new_damage,
+                                    new_location, new_vin, new_engine
+                                )
+                                st.success("Dados atualizados!")
+                                st.rerun()
 
                         # Price history chart
                         history = get_price_history(vehicle.id)
