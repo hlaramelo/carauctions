@@ -653,21 +653,17 @@ elif page == "Monitorados":
             rows = []
             for a in auctions:
                 if not a.vehicle_id:
-                    # Try to extract info from URL for display
                     desc = _describe_from_url(a.url)
+                    car_name = f"{desc.get('year', '')} {desc.get('make', '')} {desc.get('model', '')}".strip()
                     rows.append({
                         "ID": a.id,
-                        "Source": a.source,
-                        "Year": desc.get("year", 0),
-                        "Make": desc.get("make", "—"),
-                        "Model": desc.get("model", "Aguardando fetch"),
-                        "Bid (USD)": 0,
-                        "Custo Total (BRL)": 0,
-                        "Lucro (BRL)": 0,
-                        "Margem %": 0.0,
+                        "Veiculo": car_name or "Aguardando fetch",
+                        "Bid (USD)": "—",
+                        "Km": "—",
+                        "Dano": "—",
                         "Titulo": desc.get("title", "—"),
+                        "Local": "—",
                         "Tempo": "—",
-                        "URL": a.url,
                     })
                     continue
 
@@ -676,39 +672,39 @@ elif page == "Monitorados":
                     continue
 
                 analysis = monitor_engine.analyze(vehicle)
-                tempo = MonitorEngine.format_time_remaining(analysis.get("tempo_restante_s"))
+                has_end = vehicle.auction_end is not None
+                tempo = MonitorEngine.format_time_remaining(
+                    analysis.get("tempo_restante_s"), has_auction_end=has_end
+                )
+
+                bid_str = f"$ {int(vehicle.current_bid_usd):,}" if vehicle.current_bid_usd else "—"
+                km_str = f"{vehicle.mileage:,} mi" if vehicle.mileage else "—"
+                location = ""
+                if vehicle.location_city and vehicle.location_state:
+                    location = f"{vehicle.location_city}, {vehicle.location_state}"
+                elif vehicle.location_state:
+                    location = vehicle.location_state
+                car_name = f"{vehicle.year} {vehicle.make} {vehicle.model}".strip()
+                if vehicle.trim:
+                    car_name += f" {vehicle.trim}"
 
                 rows.append({
                     "ID": a.id,
-                    "Source": a.source,
-                    "Year": int(vehicle.year) if vehicle.year else 0,
-                    "Make": vehicle.make or "",
-                    "Model": vehicle.model or "",
-                    "Bid (USD)": int(vehicle.current_bid_usd or 0),
-                    "Custo Total (BRL)": int(analysis.get("custo_total_brl", 0)),
-                    "Lucro (BRL)": int(analysis.get("lucro_brl", 0)) if analysis.get("lucro_brl") is not None else 0,
-                    "Margem %": round(analysis.get("margem_pct", 0) or 0, 1),
-                    "Titulo": vehicle.title_status or "N/A",
+                    "Veiculo": car_name,
+                    "Bid (USD)": bid_str,
+                    "Km": km_str,
+                    "Dano": vehicle.damage_description or "—",
+                    "Titulo": vehicle.title_status or "—",
+                    "Local": location or "—",
                     "Tempo": tempo,
-                    "URL": a.url,
                 })
 
             if rows:
                 df_mon = pd.DataFrame(rows)
-                display_cols = [
-                    "ID", "Source", "Year", "Make", "Model", "Bid (USD)",
-                    "Custo Total (BRL)", "Lucro (BRL)", "Margem %", "Titulo", "Tempo",
-                ]
                 st.dataframe(
-                    df_mon[display_cols],
+                    df_mon,
                     use_container_width=True,
                     hide_index=True,
-                    column_config={
-                        "Bid (USD)": st.column_config.NumberColumn(format="$ %d"),
-                        "Custo Total (BRL)": st.column_config.NumberColumn(format="R$ %d"),
-                        "Lucro (BRL)": st.column_config.NumberColumn(format="R$ %d"),
-                        "Margem %": st.column_config.NumberColumn(format="%.1f %%"),
-                    },
                 )
 
                 # Expanders with details and fetch buttons
@@ -734,38 +730,50 @@ elif page == "Monitorados":
                     if not vehicle:
                         continue
 
-                    label = f"[{a.source}] {vehicle.year} {vehicle.make} {vehicle.model}"
+                    car_label = f"{vehicle.year} {vehicle.make} {vehicle.model}"
+                    if vehicle.trim:
+                        car_label += f" {vehicle.trim}"
+                    label = f"[{a.source}] {car_label}"
                     with st.expander(label):
-                        if st.button("Forcar Fetch", key=f"fetch_{a.id}"):
-                            with st.spinner("Buscando dados..."):
-                                ok, msg = force_fetch_auction(a)
-                            if ok:
-                                st.success(msg)
-                                st.rerun()
-                            else:
-                                st.error(msg)
+                        col_btn, col_link = st.columns([1, 3])
+                        with col_btn:
+                            if st.button("Atualizar", key=f"fetch_{a.id}"):
+                                with st.spinner("Buscando dados..."):
+                                    ok, msg = force_fetch_auction(a)
+                                if ok:
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        with col_link:
+                            st.markdown(f"[Abrir no {a.source.title()}]({vehicle.url})")
 
                         analysis = monitor_engine.analyze(vehicle)
+                        has_end = vehicle.auction_end is not None
+                        tempo = MonitorEngine.format_time_remaining(
+                            analysis.get("tempo_restante_s"), has_auction_end=has_end
+                        )
 
                         col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("Bid", f"${vehicle.current_bid_usd or 0:,.0f}")
-                        col2.metric("Custo BR", f"R${analysis.get('custo_total_brl', 0):,.0f}")
-                        if analysis.get("venda_estimada_brl"):
-                            col3.metric("Venda Est.", f"R${analysis['venda_estimada_brl']:,.0f}")
-                        if analysis.get("lucro_brl") is not None:
-                            col4.metric("Lucro", f"R${analysis['lucro_brl']:,.0f}")
+                        col1.metric("Bid Atual", f"${vehicle.current_bid_usd or 0:,.0f}")
+                        col2.metric("Km", f"{vehicle.mileage:,} mi" if vehicle.mileage else "—")
+                        col3.metric("Titulo", vehicle.title_status or "—")
+                        col4.metric("Tempo", tempo)
 
                         if vehicle.damage_description:
                             st.write(f"**Dano:** {vehicle.damage_description}")
-                        st.write(f"**Titulo:** {vehicle.title_status or 'N/A'}")
+                        if vehicle.location_city or vehicle.location_state:
+                            loc = f"{vehicle.location_city or ''}, {vehicle.location_state or ''}".strip(", ")
+                            st.write(f"**Local:** {loc}")
+                        if vehicle.vin:
+                            st.write(f"**VIN:** {vehicle.vin}")
 
                         # Price history chart
                         history = get_price_history(vehicle.id)
                         if history:
+                            st.write("**Historico de Bid:**")
                             hist_df = pd.DataFrame(history)
                             st.line_chart(hist_df.set_index("timestamp")["price"])
-
-                        st.markdown(f"[Abrir listing]({vehicle.url})")
     finally:
         session.close()
 

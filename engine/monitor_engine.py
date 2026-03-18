@@ -83,9 +83,11 @@ class MonitorEngine:
         return None
 
     @staticmethod
-    def format_time_remaining(seconds: float | None) -> str:
+    def format_time_remaining(seconds: float | None, has_auction_end: bool = False) -> str:
         """Format remaining seconds into a human-readable string."""
-        if seconds is None or seconds <= 0:
+        if seconds is None:
+            return "Encerrado" if has_auction_end else "—"
+        if seconds <= 0:
             return "Encerrado"
         hours = seconds / 3600
         if hours < 1:
