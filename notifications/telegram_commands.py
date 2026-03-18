@@ -1,20 +1,24 @@
 """Interactive Telegram bot - handles user commands via webhook/polling.
 
 Commands:
-  /start   - Welcome message and help
-  /deals   - Show top 10 deals
-  /watch   - Add vehicle to watchlist (/watch VIN or /watch Make Model Year)
-  /unwatch - Remove from watchlist (/unwatch VIN)
+  /start    - Welcome message and help
+  /deals    - Show top 10 deals
+  /watch    - Add vehicle to watchlist (/watch VIN or /watch Make Model Year)
+  /unwatch  - Remove from watchlist (/unwatch VIN)
   /watchlist - Show current watchlist
-  /filters - Show active filters
-  /pause   - Pause deal alerts
-  /resume  - Resume deal alerts
-  /status  - Show system status
-  /help    - Show available commands
+  /monitor  - Monitor a specific auction (/monitor URL)
+  /monitors - Show monitored auctions
+  /unmonitor - Stop monitoring (/unmonitor ID)
+  /filters  - Show active filters
+  /pause    - Pause deal alerts
+  /resume   - Resume deal alerts
+  /status   - Show system status
+  /help     - Show available commands
 """
 
 import json
 import os
+import re
 import threading
 
 from loguru import logger
@@ -23,6 +27,7 @@ from sqlalchemy import select, func
 from config import load_settings
 from models.database import get_session, init_db
 from models.deal import Deal
+from models.monitored_auction import MonitoredAuction
 from models.vehicle import Vehicle
 from models.watchlist import WatchlistItem, UserPreferences
 
@@ -107,6 +112,9 @@ class TelegramCommandHandler:
             "/watch": self._cmd_watch,
             "/unwatch": self._cmd_unwatch,
             "/watchlist": self._cmd_watchlist,
+            "/monitor": self._cmd_monitor,
+            "/monitors": self._cmd_monitors,
+            "/unmonitor": self._cmd_unmonitor,
             "/filters": self._cmd_filters,
             "/pause": self._cmd_pause,
             "/resume": self._cmd_resume,
@@ -132,7 +140,11 @@ class TelegramCommandHandler:
             "/watch `VIN` - Acompanhar veiculo por VIN\n"
             "/watch `Make Model Year` - Acompanhar por spec\n"
             "/unwatch `VIN` - Parar de acompanhar\n"
-            "/watchlist - Ver veiculos acompanhados\n"
+            "/watchlist - Ver veiculos acompanhados\n\n"
+            "*Monitoramento:*\n"
+            "/monitor `URL` - Monitorar leilao especifico\n"
+            "/monitors - Ver leiloes monitorados\n"
+            "/unmonitor `ID` - Parar de monitorar\n\n"
             "/filters - Ver filtros ativos\n"
             "/pause - Pausar alertas\n"
             "/resume - Retomar alertas\n"
@@ -446,6 +458,244 @@ class TelegramCommandHandler:
                 f"*Fontes:*\n{source_lines}"
                 f"{top_info}"
             ))
+        finally:
+            session.close()
+
+    # --- Monitor commands ---
+
+    # URL patterns for detecting auction source
+    _URL_PATTERNS = [
+        (re.compile(r"copart\.com/lot/(\d+)"), "copart", "copart_{0}"),
+        (re.compile(r"bringatrailer\.com/listing/([^/?]+)"), "bat", "{0}"),
+        (re.compile(r"carsandbids\.com/auctions/([^/?]+)"), "carsandbids", "cab_{0}"),
+        (re.compile(r"hemmings\.com/classifieds/.*/(\d+)"), "hemmings", "hem_{0}"),
+    ]
+
+    @classmethod
+    def parse_auction_url(cls, url: str) -> tuple[str, str] | None:
+        """Parse an auction URL and return (source, source_id) or None."""
+        for pattern, source, id_template in cls._URL_PATTERNS:
+            match = pattern.search(url)
+            if match:
+                source_id = id_template.format(match.group(1))
+                return source, source_id
+        return None
+
+    def _cmd_monitor(self, chat_id: str, args: str):
+        """Monitor a specific auction by URL."""
+        if not args:
+            self._send(chat_id, (
+                "Uso: `/monitor URL`\n\n"
+                "Fontes suportadas:\n"
+                "- copart.com/lot/...\n"
+                "- bringatrailer.com/listing/...\n"
+                "- carsandbids.com/auctions/...\n"
+                "- hemmings.com/classifieds/..."
+            ))
+            return
+
+        url = args.strip()
+        parsed = self.parse_auction_url(url)
+        if not parsed:
+            self._send(chat_id, "URL nao reconhecida. Envie uma URL do Copart, BaT, Cars & Bids ou Hemmings.")
+            return
+
+        source, source_id = parsed
+
+        session = get_session()
+        try:
+            # Check duplicate
+            existing = session.execute(
+                select(MonitoredAuction).where(
+                    MonitoredAuction.source_id == source_id,
+                    MonitoredAuction.is_active == True,  # noqa: E712
+                )
+            ).scalar_one_or_none()
+
+            if existing:
+                self._send(chat_id, f"Este leilao ja esta sendo monitorado (#{existing.id}).")
+                return
+
+            auction = MonitoredAuction(
+                source=source,
+                source_id=source_id,
+                url=url,
+                chat_id=chat_id,
+            )
+            session.add(auction)
+            session.commit()
+
+            self._send(chat_id, f"Monitoramento ativado (#{auction.id})\nFonte: {source}\nBuscando dados...")
+
+            # Immediate fetch
+            self._fetch_and_report(chat_id, auction, session)
+
+        except Exception as e:
+            logger.error(f"Error in /monitor: {e}")
+            session.rollback()
+            self._send(chat_id, f"Erro ao monitorar: {e}")
+        finally:
+            session.close()
+
+    def _fetch_and_report(self, chat_id: str, auction: MonitoredAuction, session):
+        """Fetch auction data immediately and report back."""
+        from datetime import datetime, timezone
+        from scrapers.bring_a_trailer import BringATrailerScraper
+        from scrapers.cars_and_bids import CarsAndBidsScraper
+        from scrapers.copart import CopartScraper
+        from scrapers.hemmings import HemmingsScraper
+        from engine.monitor_engine import MonitorEngine
+
+        scraper_map = {
+            "copart": CopartScraper,
+            "bat": BringATrailerScraper,
+            "carsandbids": CarsAndBidsScraper,
+            "hemmings": HemmingsScraper,
+        }
+
+        scraper_cls = scraper_map.get(auction.source)
+        if not scraper_cls:
+            self._send(chat_id, "Fonte nao suportada.")
+            return
+
+        try:
+            scraper = scraper_cls()
+            vehicle = scraper.fetch_single_listing(auction.url)
+        except Exception as e:
+            self._send(chat_id, f"Erro ao buscar dados: {e}")
+            return
+
+        if not vehicle:
+            self._send(chat_id, "Nao foi possivel obter dados deste leilao. Verifique a URL.")
+            return
+
+        # Upsert vehicle
+        existing_v = session.execute(
+            select(Vehicle).where(
+                Vehicle.source == vehicle.source,
+                Vehicle.source_id == vehicle.source_id,
+            )
+        ).scalar_one_or_none()
+
+        if existing_v:
+            if vehicle.current_bid_usd:
+                existing_v.current_bid_usd = vehicle.current_bid_usd
+            if vehicle.buy_now_price_usd:
+                existing_v.buy_now_price_usd = vehicle.buy_now_price_usd
+            if vehicle.auction_end:
+                existing_v.auction_end = vehicle.auction_end
+            if vehicle.mileage:
+                existing_v.mileage = vehicle.mileage
+            if vehicle.title_status:
+                existing_v.title_status = vehicle.title_status
+            if vehicle.damage_description:
+                existing_v.damage_description = vehicle.damage_description
+            existing_v.is_active = True
+            vehicle_obj = existing_v
+        else:
+            session.add(vehicle)
+            session.flush()
+            vehicle_obj = vehicle
+
+        auction.vehicle_id = vehicle_obj.id
+        auction.last_checked_at = datetime.now(timezone.utc)
+        session.commit()
+
+        # Analyze
+        engine = MonitorEngine()
+        analysis = engine.analyze(vehicle_obj)
+
+        # Report
+        bid_str = f"${vehicle_obj.current_bid_usd:,.0f}" if vehicle_obj.current_bid_usd else "N/A"
+        title_str = vehicle_obj.title_status or "N/A"
+        damage_str = f"\nDano: {vehicle_obj.damage_description}" if vehicle_obj.damage_description else ""
+
+        lines = [
+            f"*{vehicle_obj.year} {vehicle_obj.make} {vehicle_obj.model}*",
+            f"Bid: {bid_str} | Titulo: {title_str}{damage_str}",
+        ]
+
+        if analysis.get("custo_total_brl"):
+            lines.append(f"Custo total BR: R${analysis['custo_total_brl']:,.0f}")
+        if analysis.get("venda_estimada_brl"):
+            lines.append(f"Venda estimada: R${analysis['venda_estimada_brl']:,.0f}")
+        if analysis.get("lucro_brl") is not None:
+            lines.append(f"Lucro est.: R${analysis['lucro_brl']:,.0f} ({analysis['margem_pct']:.1f}%)")
+
+        tempo = MonitorEngine.format_time_remaining(analysis.get("tempo_restante_s"))
+        lines.append(f"Tempo restante: {tempo}")
+
+        self._send(chat_id, "\n".join(lines))
+
+    def _cmd_monitors(self, chat_id: str, _args: str):
+        """List all actively monitored auctions."""
+        session = get_session()
+        try:
+            auctions = session.execute(
+                select(MonitoredAuction).where(
+                    MonitoredAuction.chat_id == chat_id,
+                    MonitoredAuction.is_active == True,  # noqa: E712
+                )
+            ).scalars().all()
+
+            if not auctions:
+                self._send(chat_id, "Nenhum leilao monitorado.\nUse `/monitor URL` para adicionar.")
+                return
+
+            from engine.monitor_engine import MonitorEngine
+
+            lines = ["*Leiloes Monitorados*\n"]
+            for a in auctions:
+                if a.vehicle_id:
+                    vehicle = session.get(Vehicle, a.vehicle_id)
+                    if vehicle:
+                        bid_str = f"${vehicle.current_bid_usd:,.0f}" if vehicle.current_bid_usd else "N/A"
+                        engine = MonitorEngine()
+                        analysis = engine.analyze(vehicle)
+                        tempo = MonitorEngine.format_time_remaining(analysis.get("tempo_restante_s"))
+                        margem = f" | Margem: {analysis['margem_pct']:.1f}%" if analysis.get("margem_pct") is not None else ""
+
+                        lines.append(
+                            f"#{a.id} [{a.source}] *{vehicle.year} {vehicle.make} {vehicle.model}*\n"
+                            f"  Bid: {bid_str}{margem}\n"
+                            f"  Tempo: {tempo}\n"
+                            f"  [Ver]({a.url})\n"
+                        )
+                    else:
+                        lines.append(f"#{a.id} [{a.source}] {a.url}\n  Dados pendentes\n")
+                else:
+                    lines.append(f"#{a.id} [{a.source}] {a.url}\n  Aguardando primeiro fetch\n")
+
+            self._send(chat_id, "\n".join(lines))
+        finally:
+            session.close()
+
+    def _cmd_unmonitor(self, chat_id: str, args: str):
+        """Stop monitoring an auction."""
+        if not args or not args.strip().isdigit():
+            self._send(chat_id, "Uso: `/unmonitor ID` (ex: `/unmonitor 1`)")
+            return
+
+        auction_id = int(args.strip())
+        session = get_session()
+        try:
+            auction = session.execute(
+                select(MonitoredAuction).where(
+                    MonitoredAuction.id == auction_id,
+                    MonitoredAuction.chat_id == chat_id,
+                    MonitoredAuction.is_active == True,  # noqa: E712
+                )
+            ).scalar_one_or_none()
+
+            if not auction:
+                self._send(chat_id, f"Monitoramento #{auction_id} nao encontrado.")
+                return
+
+            auction.is_active = False
+            session.commit()
+
+            label = auction.url.split("/")[-1][:40]
+            self._send(chat_id, f"Monitoramento #{auction_id} desativado ({label})")
         finally:
             session.close()
 

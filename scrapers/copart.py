@@ -39,6 +39,42 @@ class CopartScraper(BaseScraper):
             "Referer": "https://www.copart.com/lotSearchResults/",
         })
 
+    def fetch_single_listing(self, url: str) -> Vehicle | None:
+        """Fetch a single Copart lot by URL using the detail API."""
+        lot_match = re.search(r"/lot/(\d+)", url)
+        if not lot_match:
+            logger.error(f"[Copart] Cannot extract lot number from URL: {url}")
+            return None
+
+        lot_number = lot_match.group(1)
+        logger.info(f"[Copart] Fetching single lot: {lot_number}")
+
+        try:
+            time.sleep(self.request_delay)
+            response = self.session.get(
+                COPART_DETAIL_URL,
+                params={"lotNumber": lot_number},
+                timeout=15,
+            )
+            if response.status_code == 403:
+                logger.warning("[Copart] Blocked (403) on detail API")
+                return None
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as e:
+            logger.error(f"[Copart] Detail API failed for lot {lot_number}: {e}")
+            return None
+        except ValueError:
+            logger.error("[Copart] Invalid JSON from detail API")
+            return None
+
+        lot_data = data.get("data", {}).get("lotDetails", data.get("data", {}))
+        if not lot_data:
+            logger.warning(f"[Copart] No data returned for lot {lot_number}")
+            return None
+
+        return self._parse_result(lot_data)
+
     def scrape_listings(self) -> list[Vehicle]:
         """Scrape active auction listings from Copart matching our filters."""
         vehicles = []

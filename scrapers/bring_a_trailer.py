@@ -56,6 +56,10 @@ class BringATrailerScraper(BaseScraper):
         logger.info(f"[BaT] Successfully scraped {len(vehicles)} vehicles")
         return vehicles
 
+    def fetch_single_listing(self, url: str) -> Vehicle | None:
+        """Fetch a single BaT listing by URL."""
+        return self.scrape_listing_detail(url)
+
     def scrape_listing_detail(self, url: str) -> Vehicle | None:
         """Scrape detailed info from a single listing page."""
         html = self.fetch_page(url)

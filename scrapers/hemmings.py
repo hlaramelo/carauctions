@@ -26,6 +26,93 @@ class HemmingsScraper(BaseScraper):
         self.filters = settings.get("filters", {})
         self.max_pages = settings.get("scraping", {}).get("hemmings", {}).get("max_pages", 3)
 
+    def fetch_single_listing(self, url: str) -> Vehicle | None:
+        """Fetch a single Hemmings listing by URL."""
+        html = self.fetch_page(url)
+        if not html:
+            return None
+
+        soup = BeautifulSoup(html, "lxml")
+
+        # Extract listing ID from URL
+        id_match = re.search(r"/(\d+)(?:\?|$)", url)
+        listing_id = id_match.group(1) if id_match else ""
+        if not listing_id:
+            return None
+
+        # Title
+        title_el = soup.select_one("h1, .listing-title, .vehicle-title")
+        title_text = title_el.get_text(strip=True) if title_el else ""
+        year, make, model = self._parse_title(title_text, "")
+        if not make:
+            return None
+
+        # Price
+        price = None
+        price_el = soup.select_one(".listing-price, .price, [data-price], .asking-price")
+        if price_el:
+            price_text = price_el.get("data-price", "") or price_el.get_text(strip=True)
+            price = self._parse_price(price_text)
+        if not price:
+            price_match = re.search(r"\$[\d,]+", soup.get_text())
+            if price_match:
+                price = self._parse_price(price_match.group())
+
+        # Mileage
+        mileage = None
+        text = soup.get_text()
+        mile_match = re.search(r"([\d,]+)\s*(?:miles?|mi)", text, re.IGNORECASE)
+        if mile_match:
+            mileage = int(mile_match.group(1).replace(",", ""))
+
+        # Location
+        location_state = None
+        location_city = None
+        loc_el = soup.select_one(".location, .listing-location, .dealer-location")
+        if loc_el:
+            loc_text = loc_el.get_text(strip=True)
+            state_match = re.search(r",\s*([A-Z]{2})", loc_text)
+            if state_match:
+                location_state = state_match.group(1)
+                location_city = loc_text.split(",")[0].strip()
+
+        # Title status
+        title_status = "clean"
+        text_lower = text.lower()
+        if "salvage" in text_lower:
+            title_status = "salvage"
+        elif "rebuilt" in text_lower:
+            title_status = "rebuilt"
+
+        # VIN
+        vin = None
+        vin_match = re.search(r"VIN[:\s]*([A-HJ-NPR-Z0-9]{17})", text)
+        if vin_match:
+            vin = vin_match.group(1)
+
+        # Images
+        images = []
+        for img in soup.select(".gallery img, .carousel img, .listing-image img"):
+            src = img.get("src", "") or img.get("data-src", "")
+            if src:
+                images.append(src)
+
+        return Vehicle(
+            source=self.SOURCE_NAME,
+            source_id=f"hem_{listing_id}",
+            url=url,
+            make=make,
+            model=model,
+            year=year or 0,
+            vin=vin,
+            current_bid_usd=price,
+            mileage=mileage,
+            title_status=title_status,
+            location_state=location_state,
+            location_city=location_city,
+            image_urls=json.dumps(images[:10]) if images else None,
+        )
+
     def scrape_listings(self) -> list[Vehicle]:
         """Scrape active listings from Hemmings matching our filters."""
         vehicles = []

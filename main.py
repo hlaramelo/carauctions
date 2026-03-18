@@ -26,6 +26,7 @@ from scheduler import (
     run_deal_scoring,
     run_fipe_enrichment,
     run_hemmings_scrape,
+    run_monitored_auctions,
     run_price_history_recording,
     run_alerts,
     run_full_pipeline,
@@ -107,6 +108,7 @@ def run_scheduled():
         start_date="2024-01-01 00:02:00",
     )
     sched.add_job(run_alerts, "interval", minutes=30, id="alerts")
+    sched.add_job(run_monitored_auctions, "interval", minutes=5, id="monitored_auctions")
     sched.add_job(run_daily_digest, "cron", hour=8, minute=0, id="daily_digest")
 
     logger.info("Scheduler started. Press Ctrl+C to exit.")
@@ -118,6 +120,7 @@ def run_scheduled():
     logger.info(f"  BR market scrape: every {br_market_interval} hours")
     logger.info(f"  Deal scoring: every {bat_interval} min")
     logger.info("  Alerts: every 30 min")
+    logger.info("  Monitored auctions: every 5 min")
     logger.info("  Daily digest email: 08:00")
 
     # Start Telegram command bot (background polling)

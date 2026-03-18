@@ -1,14 +1,18 @@
 """Job scheduler - orchestrates scraping, scoring, and alerting."""
 
+from datetime import datetime, timezone
+
 from loguru import logger
 from sqlalchemy import select
 
 from config import load_settings
 from engine.deal_scorer import DealScorer
+from engine.monitor_engine import MonitorEngine
 from engine.price_history import PriceHistoryEngine, BRMarketAnalyzer
 from models.br_listing import BRMarketListing
 from models.database import get_session, init_db
 from models.deal import Deal, AlertLog
+from models.monitored_auction import MonitoredAuction
 from models.vehicle import Vehicle
 from notifications.email_sender import EmailSender
 from notifications.sheets_sync import SheetsSync
@@ -412,6 +416,162 @@ def run_daily_digest():
         session.close()
 
 
+SCRAPER_MAP = {
+    "copart": CopartScraper,
+    "bat": BringATrailerScraper,
+    "carsandbids": CarsAndBidsScraper,
+    "hemmings": HemmingsScraper,
+}
+
+# Intervals in seconds
+_MONITOR_NORMAL_INTERVAL = 3600   # 1 hour
+_MONITOR_URGENT_INTERVAL = 300    # 5 min
+_MONITOR_URGENT_THRESHOLD = 1800  # 30 min before auction end
+
+
+def run_monitored_auctions():
+    """Fetch updates for individually monitored auction listings.
+
+    Frequency logic:
+    - Normal: re-check if last_checked_at > 1h ago
+    - Urgent: re-check every 5 min if auction ends in < 30 min
+    """
+    logger.info("=== Starting monitored auctions job ===")
+    session = get_session()
+    engine = MonitorEngine()
+    price_engine = PriceHistoryEngine()
+    telegram = TelegramNotifier()
+
+    try:
+        auctions = session.execute(
+            select(MonitoredAuction).where(MonitoredAuction.is_active == True)  # noqa: E712
+        ).scalars().all()
+
+        if not auctions:
+            logger.info("[Monitor] No active monitored auctions")
+            return
+
+        now = datetime.now(timezone.utc)
+        checked = 0
+        alerted = 0
+
+        for auction in auctions:
+            # Decide if this auction needs a check
+            if not _should_check(auction, session, now):
+                continue
+
+            # Get the right scraper
+            scraper_cls = SCRAPER_MAP.get(auction.source)
+            if not scraper_cls:
+                logger.warning(f"[Monitor] Unknown source: {auction.source}")
+                continue
+
+            scraper = scraper_cls()
+            try:
+                vehicle = scraper.fetch_single_listing(auction.url)
+            except NotImplementedError:
+                logger.warning(f"[Monitor] {auction.source} does not support single fetch")
+                continue
+            except Exception as e:
+                logger.error(f"[Monitor] Failed to fetch {auction.url}: {e}")
+                continue
+
+            if not vehicle:
+                logger.warning(f"[Monitor] No data returned for {auction.url}")
+                auction.last_checked_at = now
+                continue
+
+            # Upsert vehicle
+            existing = session.execute(
+                select(Vehicle).where(
+                    Vehicle.source == vehicle.source,
+                    Vehicle.source_id == vehicle.source_id,
+                )
+            ).scalar_one_or_none()
+
+            if existing:
+                old_bid = existing.current_bid_usd
+                if vehicle.current_bid_usd:
+                    existing.current_bid_usd = vehicle.current_bid_usd
+                if vehicle.buy_now_price_usd:
+                    existing.buy_now_price_usd = vehicle.buy_now_price_usd
+                if vehicle.auction_end:
+                    existing.auction_end = vehicle.auction_end
+                if vehicle.mileage:
+                    existing.mileage = vehicle.mileage
+                if vehicle.engine_cc:
+                    existing.engine_cc = vehicle.engine_cc
+                if vehicle.title_status:
+                    existing.title_status = vehicle.title_status
+                if vehicle.damage_description:
+                    existing.damage_description = vehicle.damage_description
+                if vehicle.vin:
+                    existing.vin = vehicle.vin
+                existing.is_active = True
+                vehicle_obj = existing
+            else:
+                session.add(vehicle)
+                session.flush()
+                vehicle_obj = vehicle
+                old_bid = None
+
+            # Link auction to vehicle
+            auction.vehicle_id = vehicle_obj.id
+            auction.last_checked_at = now
+
+            # Record price history
+            price_engine.record_auction_price(vehicle_obj)
+
+            # Analyze
+            analysis = engine.analyze(vehicle_obj)
+
+            # Check for alerts
+            if old_bid and vehicle_obj.current_bid_usd and old_bid > 0:
+                change_pct = ((vehicle_obj.current_bid_usd - old_bid) / old_bid) * 100
+                if abs(change_pct) >= 5:
+                    reason = f"Preco mudou {change_pct:+.1f}% (${old_bid:,.0f} → ${vehicle_obj.current_bid_usd:,.0f})"
+                    telegram.send_monitor_alert(auction, vehicle_obj, analysis, reason)
+                    alerted += 1
+
+            # Urgency alert: auction ending in < 2h
+            if analysis.get("tempo_restante_s") and analysis["tempo_restante_s"] < 7200:
+                tempo_str = MonitorEngine.format_time_remaining(analysis["tempo_restante_s"])
+                reason = f"Leilao encerra em {tempo_str}"
+                telegram.send_monitor_alert(auction, vehicle_obj, analysis, reason)
+                alerted += 1
+
+            checked += 1
+
+        session.commit()
+        logger.info(f"[Monitor] Checked {checked} auctions, sent {alerted} alerts")
+    except Exception as e:
+        logger.error(f"Error in monitored auctions: {e}")
+        session.rollback()
+    finally:
+        session.close()
+
+
+def _should_check(auction: MonitoredAuction, session, now: datetime) -> bool:
+    """Determine if a monitored auction needs to be re-fetched."""
+    if auction.last_checked_at is None:
+        return True  # Never checked
+
+    elapsed = (now - auction.last_checked_at.replace(tzinfo=timezone.utc)).total_seconds()
+
+    # If we have a linked vehicle, check if auction is ending soon
+    if auction.vehicle_id:
+        vehicle = session.get(Vehicle, auction.vehicle_id)
+        if vehicle and vehicle.auction_end:
+            time_left = (vehicle.auction_end - now).total_seconds()
+            if time_left <= _MONITOR_URGENT_THRESHOLD:
+                return elapsed >= _MONITOR_URGENT_INTERVAL
+            if time_left <= 0:
+                # Auction ended — no need to keep checking
+                return False
+
+    return elapsed >= _MONITOR_NORMAL_INTERVAL
+
+
 def run_full_pipeline():
     """Run the complete pipeline: scrape -> enrich -> score -> alert."""
     logger.info("========================================")
@@ -435,6 +595,9 @@ def run_full_pipeline():
     # Score and alert
     run_deal_scoring()
     run_alerts()
+
+    # Monitor individual listings
+    run_monitored_auctions()
 
     logger.info("========================================")
     logger.info("Pipeline run complete")

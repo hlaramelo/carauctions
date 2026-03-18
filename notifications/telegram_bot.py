@@ -6,6 +6,7 @@ import requests
 from loguru import logger
 
 from models.deal import Deal, AlertLog
+from models.monitored_auction import MonitoredAuction
 from models.vehicle import Vehicle
 from models.database import get_session
 
@@ -64,6 +65,68 @@ class TelegramNotifier:
             return False
 
         return self._send_message(message)
+
+    def send_monitor_alert(
+        self,
+        auction: MonitoredAuction,
+        vehicle: Vehicle,
+        analysis: dict,
+        reason: str,
+    ) -> bool:
+        """Send an alert for a monitored auction."""
+        from engine.monitor_engine import MonitorEngine
+
+        tempo = MonitorEngine.format_time_remaining(analysis.get("tempo_restante_s"))
+        bid_str = f"${analysis.get('auction_price_usd', 0):,.0f}"
+        custo_str = f"R${analysis.get('custo_total_brl', 0):,.0f}"
+
+        lines = [
+            f"📡 *MONITOR UPDATE*",
+            f"*{vehicle.year} {vehicle.make} {vehicle.model}*",
+            f"",
+            f"⚡ {reason}",
+            f"",
+            f"💰 Bid: {bid_str}",
+            f"📊 Custo BR: {custo_str}",
+        ]
+
+        if analysis.get("lucro_brl") is not None:
+            lines.append(f"📈 Lucro est.: R${analysis['lucro_brl']:,.0f} ({analysis['margem_pct']:.1f}%)")
+
+        lines.extend([
+            f"🏷️ Titulo: {analysis.get('titulo', 'N/A')}",
+            f"⏰ Tempo: {tempo}",
+            f"",
+            f"[Ver listing]({vehicle.url})",
+        ])
+
+        message = "\n".join(lines)
+        target_chat = auction.chat_id if auction.chat_id != "dashboard" else self.chat_id
+
+        if not self.is_configured:
+            logger.info(f"[Telegram] Would send monitor alert:\n{message}")
+            return False
+
+        return self._send_message_to(target_chat, message)
+
+    def _send_message_to(self, chat_id: str, text: str, parse_mode: str = "Markdown") -> bool:
+        """Send a message to a specific chat ID."""
+        try:
+            response = requests.post(
+                f"{self.api_base}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": parse_mode,
+                    "disable_web_page_preview": False,
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException as e:
+            logger.error(f"[Telegram] Failed to send message to {chat_id}: {e}")
+            return False
 
     def send_message(self, text: str) -> bool:
         """Send a plain text message."""

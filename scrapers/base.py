@@ -40,6 +40,10 @@ class BaseScraper(ABC):
         """
         ...
 
+    def fetch_single_listing(self, url: str) -> Vehicle | None:
+        """Fetch a single listing by URL. Override in subclasses that support it."""
+        raise NotImplementedError(f"{self.SOURCE_NAME} does not support single listing fetch")
+
     def fetch_page(self, url: str, params: dict | None = None) -> str | None:
         """Fetch a page with rate limiting and error handling."""
         try:

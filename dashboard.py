@@ -11,11 +11,14 @@ from sqlalchemy import select, func
 
 from models.database import get_session, init_db
 from models.deal import Deal
+from models.monitored_auction import MonitoredAuction
 from models.vehicle import Vehicle, PriceHistory
 from models.br_listing import BRMarketListing, BRPriceSnapshot
 from models.watchlist import WatchlistItem
+from engine.monitor_engine import MonitorEngine
 from engine.price_history import BRMarketAnalyzer
 from engine.currency import get_usd_brl_rate, _cache as _currency_cache
+from notifications.telegram_commands import TelegramCommandHandler
 
 init_db()
 
@@ -268,7 +271,7 @@ with st.sidebar:
     st.markdown("### Navegacao")
     page = st.radio(
         "Selecionar pagina",
-        ["Dashboard", "Deals", "Analise de Mercado", "Watchlist"],
+        ["Dashboard", "Deals", "Monitorados", "Analise de Mercado", "Watchlist"],
         label_visibility="collapsed",
     )
 
@@ -398,6 +401,211 @@ elif page == "Deals":
             col5.metric("Historico", f"{selected['Score History']:.0f}")
 
             st.markdown(f"[Abrir listing]({selected['URL']})")
+
+# =============================================================================
+# MONITORADOS
+# =============================================================================
+elif page == "Monitorados":
+    section("Leiloes Monitorados")
+
+    # Add URL form
+    with st.form("add_monitor", clear_on_submit=True):
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            monitor_url = st.text_input(
+                "URL do leilao",
+                placeholder="https://www.copart.com/lot/78272755",
+            )
+        with col2:
+            st.write("")  # spacing
+            submitted = st.form_submit_button("Monitorar")
+
+    if submitted and monitor_url:
+        parsed = TelegramCommandHandler.parse_auction_url(monitor_url)
+        if parsed:
+            source, source_id = parsed
+            session = get_session()
+            try:
+                existing = session.execute(
+                    select(MonitoredAuction).where(
+                        MonitoredAuction.source_id == source_id,
+                        MonitoredAuction.is_active == True,  # noqa: E712
+                    )
+                ).scalar_one_or_none()
+
+                if existing:
+                    st.warning(f"Este leilao ja esta sendo monitorado (#{existing.id}).")
+                else:
+                    from datetime import datetime, timezone
+                    from scrapers.copart import CopartScraper
+                    from scrapers.bring_a_trailer import BringATrailerScraper
+                    from scrapers.cars_and_bids import CarsAndBidsScraper
+                    from scrapers.hemmings import HemmingsScraper
+
+                    auction = MonitoredAuction(
+                        source=source,
+                        source_id=source_id,
+                        url=monitor_url.strip(),
+                        chat_id="dashboard",
+                    )
+                    session.add(auction)
+                    session.flush()
+
+                    # Immediate fetch
+                    scraper_map = {
+                        "copart": CopartScraper,
+                        "bat": BringATrailerScraper,
+                        "carsandbids": CarsAndBidsScraper,
+                        "hemmings": HemmingsScraper,
+                    }
+                    scraper = scraper_map[source]()
+                    try:
+                        vehicle = scraper.fetch_single_listing(monitor_url.strip())
+                        if vehicle:
+                            existing_v = session.execute(
+                                select(Vehicle).where(
+                                    Vehicle.source == vehicle.source,
+                                    Vehicle.source_id == vehicle.source_id,
+                                )
+                            ).scalar_one_or_none()
+
+                            if existing_v:
+                                if vehicle.current_bid_usd:
+                                    existing_v.current_bid_usd = vehicle.current_bid_usd
+                                if vehicle.auction_end:
+                                    existing_v.auction_end = vehicle.auction_end
+                                if vehicle.title_status:
+                                    existing_v.title_status = vehicle.title_status
+                                existing_v.is_active = True
+                                vehicle = existing_v
+                            else:
+                                session.add(vehicle)
+                                session.flush()
+
+                            auction.vehicle_id = vehicle.id
+                            auction.last_checked_at = datetime.now(timezone.utc)
+                            st.success(
+                                f"Monitorando: {vehicle.year} {vehicle.make} {vehicle.model} "
+                                f"(#{auction.id})"
+                            )
+                        else:
+                            st.warning("Nao foi possivel obter dados. O leilao sera verificado no proximo ciclo.")
+                    except Exception as e:
+                        st.warning(f"Fetch inicial falhou: {e}. Sera tentado novamente.")
+
+                    session.commit()
+            except Exception as e:
+                session.rollback()
+                st.error(f"Erro: {e}")
+            finally:
+                session.close()
+        else:
+            st.error("URL nao reconhecida. Use URLs do Copart, BaT, Cars & Bids ou Hemmings.")
+
+    # List monitored auctions
+    session = get_session()
+    try:
+        auctions = session.execute(
+            select(MonitoredAuction).where(MonitoredAuction.is_active == True)  # noqa: E712
+        ).scalars().all()
+
+        if not auctions:
+            st.info("Nenhum leilao monitorado. Cole uma URL acima para comecar.")
+        else:
+            monitor_engine = MonitorEngine()
+            rows = []
+            for a in auctions:
+                if not a.vehicle_id:
+                    rows.append({
+                        "ID": a.id,
+                        "Source": a.source,
+                        "Year": 0,
+                        "Make": "—",
+                        "Model": "Aguardando fetch",
+                        "Bid (USD)": 0,
+                        "Custo Total (BRL)": 0,
+                        "Lucro (BRL)": 0,
+                        "Margem %": 0.0,
+                        "Titulo": "—",
+                        "Tempo": "—",
+                        "URL": a.url,
+                    })
+                    continue
+
+                vehicle = session.get(Vehicle, a.vehicle_id)
+                if not vehicle:
+                    continue
+
+                analysis = monitor_engine.analyze(vehicle)
+                tempo = MonitorEngine.format_time_remaining(analysis.get("tempo_restante_s"))
+
+                rows.append({
+                    "ID": a.id,
+                    "Source": a.source,
+                    "Year": int(vehicle.year) if vehicle.year else 0,
+                    "Make": vehicle.make or "",
+                    "Model": vehicle.model or "",
+                    "Bid (USD)": int(vehicle.current_bid_usd or 0),
+                    "Custo Total (BRL)": int(analysis.get("custo_total_brl", 0)),
+                    "Lucro (BRL)": int(analysis.get("lucro_brl", 0)) if analysis.get("lucro_brl") is not None else 0,
+                    "Margem %": round(analysis.get("margem_pct", 0) or 0, 1),
+                    "Titulo": vehicle.title_status or "N/A",
+                    "Tempo": tempo,
+                    "URL": a.url,
+                })
+
+            if rows:
+                df_mon = pd.DataFrame(rows)
+                display_cols = [
+                    "ID", "Source", "Year", "Make", "Model", "Bid (USD)",
+                    "Custo Total (BRL)", "Lucro (BRL)", "Margem %", "Titulo", "Tempo",
+                ]
+                st.dataframe(
+                    df_mon[display_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Bid (USD)": st.column_config.NumberColumn(format="$ %d"),
+                        "Custo Total (BRL)": st.column_config.NumberColumn(format="R$ %d"),
+                        "Lucro (BRL)": st.column_config.NumberColumn(format="R$ %d"),
+                        "Margem %": st.column_config.NumberColumn(format="%.1f %%"),
+                    },
+                )
+
+                # Expanders with details
+                section("Detalhes")
+                for a in auctions:
+                    if not a.vehicle_id:
+                        continue
+                    vehicle = session.get(Vehicle, a.vehicle_id)
+                    if not vehicle:
+                        continue
+
+                    label = f"[{a.source}] {vehicle.year} {vehicle.make} {vehicle.model}"
+                    with st.expander(label):
+                        analysis = monitor_engine.analyze(vehicle)
+
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("Bid", f"${vehicle.current_bid_usd or 0:,.0f}")
+                        col2.metric("Custo BR", f"R${analysis.get('custo_total_brl', 0):,.0f}")
+                        if analysis.get("venda_estimada_brl"):
+                            col3.metric("Venda Est.", f"R${analysis['venda_estimada_brl']:,.0f}")
+                        if analysis.get("lucro_brl") is not None:
+                            col4.metric("Lucro", f"R${analysis['lucro_brl']:,.0f}")
+
+                        if vehicle.damage_description:
+                            st.write(f"**Dano:** {vehicle.damage_description}")
+                        st.write(f"**Titulo:** {vehicle.title_status or 'N/A'}")
+
+                        # Price history chart
+                        history = get_price_history(vehicle.id)
+                        if history:
+                            hist_df = pd.DataFrame(history)
+                            st.line_chart(hist_df.set_index("timestamp")["price"])
+
+                        st.markdown(f"[Abrir listing]({vehicle.url})")
+    finally:
+        session.close()
 
 # =============================================================================
 # ANALISE DE MERCADO

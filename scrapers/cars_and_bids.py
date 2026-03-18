@@ -29,6 +29,101 @@ class CarsAndBidsScraper(BaseScraper):
         self.filters = settings.get("filters", {})
         self.max_pages = settings.get("scraping", {}).get("cars_and_bids", {}).get("max_pages", 3)
 
+    def fetch_single_listing(self, url: str) -> Vehicle | None:
+        """Fetch a single Cars & Bids listing by URL."""
+        html = self.fetch_page(url)
+        if not html:
+            return None
+
+        soup = BeautifulSoup(html, "lxml")
+
+        # Extract auction ID from URL
+        id_match = re.search(r"/auctions/([^/?]+)", url)
+        auction_id = id_match.group(1) if id_match else ""
+        if not auction_id:
+            return None
+
+        # Title
+        title_el = soup.select_one("h1, .auction-title, .listing-title")
+        title = title_el.get_text(strip=True) if title_el else ""
+        year, make, model = self._parse_title(title)
+        if not make:
+            return None
+
+        # Current bid
+        bid = None
+        bid_el = soup.select_one(".current-bid, .bid-value, .auction-bid, .bid-amount")
+        if bid_el:
+            bid = self._parse_price(bid_el.get_text())
+        if not bid:
+            bid_match = re.search(r"\$[\d,]+", soup.get_text())
+            if bid_match:
+                bid = self._parse_price(bid_match.group())
+
+        # Auction end
+        auction_end = None
+        timer_el = soup.select_one("[data-end-time], .time-left, .auction-timer")
+        if timer_el:
+            end_str = timer_el.get("data-end-time", "")
+            if end_str:
+                try:
+                    auction_end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    pass
+
+        # Mileage
+        mileage = None
+        text = soup.get_text()
+        mile_match = re.search(r"([\d,]+)\s*(?:miles?|mi)", text, re.IGNORECASE)
+        if mile_match:
+            mileage = int(mile_match.group(1).replace(",", ""))
+
+        # Reserve
+        reserve_met = None
+        text_lower = text.lower()
+        if "no reserve" in text_lower:
+            reserve_met = True
+        elif "reserve met" in text_lower:
+            reserve_met = True
+        elif "reserve not met" in text_lower:
+            reserve_met = False
+
+        # Title status
+        title_status = "clean"
+        if "salvage" in text_lower:
+            title_status = "salvage"
+        elif "rebuilt" in text_lower:
+            title_status = "rebuilt"
+
+        # VIN
+        vin = None
+        vin_match = re.search(r"VIN[:\s]*([A-HJ-NPR-Z0-9]{17})", text)
+        if vin_match:
+            vin = vin_match.group(1)
+
+        # Images
+        images = []
+        for img in soup.select(".gallery img, .carousel img, .auction-image img"):
+            src = img.get("src", "") or img.get("data-src", "")
+            if src:
+                images.append(src)
+
+        return Vehicle(
+            source=self.SOURCE_NAME,
+            source_id=f"cab_{auction_id}",
+            url=url,
+            make=make,
+            model=model,
+            year=year or 0,
+            vin=vin,
+            current_bid_usd=bid,
+            reserve_met=reserve_met,
+            mileage=mileage,
+            title_status=title_status,
+            image_urls=json.dumps(images[:10]) if images else None,
+            auction_end=auction_end,
+        )
+
     def scrape_listings(self) -> list[Vehicle]:
         """Scrape active auction listings from Cars & Bids."""
         vehicles = []
