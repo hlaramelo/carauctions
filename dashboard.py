@@ -186,11 +186,14 @@ if page == "Dashboard":
     col5, col6, col7, col8 = st.columns(4)
     col5.metric("Listings BR", stats["br_listings"])
     col6.metric("Watchlist", stats["watchlist"])
+    from engine.currency import _cache as _currency_cache
     try:
         usd_brl = get_usd_brl_rate()
-        col7.metric("USD/BRL (BCB)", f"R$ {usd_brl:.4f}")
+        source = _currency_cache.get("source", "fallback")
+        label = "USD/BRL (PTAX)" if source == "bcb" else "USD/BRL (fallback)"
+        col7.metric(label, f"R$ {usd_brl:.4f}")
     except Exception:
-        col7.metric("USD/BRL (BCB)", "Indisponivel")
+        col7.metric("USD/BRL", "Indisponivel")
 
     st.subheader("Veiculos por Fonte")
     if stats["sources"]:

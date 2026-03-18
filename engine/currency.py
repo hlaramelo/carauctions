@@ -11,7 +11,7 @@ from config import load_settings
 # BCB PTAX API endpoint
 BCB_API_URL = "https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata/CotacaoDolarDia(dataCotacao=@dataCotacao)"
 
-_cache: dict = {"rate": None, "timestamp": 0}
+_cache: dict = {"rate": None, "timestamp": 0, "source": None}
 
 
 def get_usd_brl_rate(force_refresh: bool = False) -> float:
@@ -30,15 +30,19 @@ def get_usd_brl_rate(force_refresh: bool = False) -> float:
         rate = _fetch_rate_from_bcb()
         _cache["rate"] = rate
         _cache["timestamp"] = time.time()
-        logger.info(f"USD/BRL rate updated: {rate:.4f}")
+        _cache["source"] = "bcb"
+        logger.info(f"USD/BRL rate updated from BCB: {rate:.4f}")
         return rate
     except Exception as e:
         logger.warning(f"Failed to fetch USD/BRL rate from BCB: {e}")
-        if _cache["rate"]:
-            logger.info(f"Using cached rate: {_cache['rate']:.4f}")
+        if _cache["rate"] and _cache["source"] == "bcb":
+            logger.info(f"Using cached BCB rate: {_cache['rate']:.4f}")
             return _cache["rate"]
         default_rate = settings.get("currency", {}).get("default_usd_brl", 5.0)
-        logger.info(f"Using default rate: {default_rate}")
+        _cache["rate"] = default_rate
+        _cache["timestamp"] = time.time()
+        _cache["source"] = "fallback"
+        logger.info(f"Using fallback rate: {default_rate}")
         return default_rate
 
 
