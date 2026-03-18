@@ -20,6 +20,9 @@ google-auth-oauthlib>=1.2
 streamlit>=1.30
 pandas>=2.1
 
+# Database (cloud PostgreSQL support)
+psycopg2-binary>=2.9
+
 # Utilities
 pyyaml>=6.0
 loguru>=0.7
