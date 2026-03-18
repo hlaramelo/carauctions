@@ -5,6 +5,7 @@ Run with: streamlit run dashboard.py
 
 import json
 
+import pandas as pd
 import streamlit as st
 from sqlalchemy import select, func
 
@@ -14,9 +15,117 @@ from models.vehicle import Vehicle, PriceHistory
 from models.br_listing import BRMarketListing, BRPriceSnapshot
 from models.watchlist import WatchlistItem
 from engine.price_history import BRMarketAnalyzer
-from engine.currency import get_usd_brl_rate
+from engine.currency import get_usd_brl_rate, _cache as _currency_cache
 
 init_db()
+
+# =============================================================================
+# STYLING
+# =============================================================================
+
+THEME_CSS = """
+<style>
+    /* Clean sans-serif base */
+    html, body, [class*="css"] {
+        font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+
+    /* Tighter header */
+    .main-header {
+        padding: 1.5rem 0 0.5rem 0;
+        border-bottom: 2px solid #1a1a2e;
+        margin-bottom: 1.5rem;
+    }
+    .main-header h1 {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #1a1a2e;
+        letter-spacing: -0.02em;
+        margin: 0;
+    }
+    .main-header p {
+        font-size: 0.85rem;
+        color: #6b7280;
+        margin: 0.2rem 0 0 0;
+    }
+
+    /* Metric cards */
+    [data-testid="stMetric"] {
+        background: #f8f9fb;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 0.8rem 1rem;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #6b7280;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 1.3rem;
+        font-weight: 700;
+        color: #1a1a2e;
+    }
+
+    /* Section headers */
+    .section-header {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #1a1a2e;
+        padding: 0.8rem 0 0.4rem 0;
+        border-bottom: 1px solid #e5e7eb;
+        margin: 1.5rem 0 1rem 0;
+    }
+
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background: #1a1a2e;
+    }
+    [data-testid="stSidebar"] * {
+        color: #e5e7eb !important;
+    }
+    [data-testid="stSidebar"] .stRadio label {
+        font-size: 0.9rem;
+        font-weight: 500;
+    }
+
+    /* Dataframes */
+    .stDataFrame {
+        border-radius: 8px;
+        overflow: hidden;
+    }
+
+    /* Subtle info boxes */
+    .stAlert {
+        border-radius: 8px;
+    }
+
+    /* Filter containers */
+    .filter-bar {
+        background: #f8f9fb;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+    }
+
+    /* Hide default Streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+</style>
+"""
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+def section(title: str):
+    """Render a styled section header."""
+    st.markdown(f'<div class="section-header">{title}</div>', unsafe_allow_html=True)
 
 
 def get_deals_df():
@@ -85,7 +194,6 @@ def get_stats():
             select(func.count(WatchlistItem.id)).where(WatchlistItem.is_active == True)  # noqa: E712
         ).scalar() or 0
 
-        # Average score and margin
         avg_score = session.execute(
             select(func.avg(Deal.score)).where(Deal.is_active == True)  # noqa: E712
         ).scalar() or 0
@@ -93,7 +201,6 @@ def get_stats():
             select(func.avg(Deal.margin_pct)).where(Deal.is_active == True)  # noqa: E712
         ).scalar() or 0
 
-        # Source breakdown
         sources = {}
         for src in ["bat", "copart", "carsandbids", "hemmings"]:
             count = session.execute(
@@ -157,23 +264,46 @@ def get_market_snapshots(make: str, model: str, year: int):
         session.close()
 
 
+SOURCE_LABELS = {
+    "bat": "Bring a Trailer",
+    "copart": "Copart",
+    "carsandbids": "Cars & Bids",
+    "hemmings": "Hemmings",
+}
+
+
 # =============================================================================
-# STREAMLIT APP
+# APP CONFIG
 # =============================================================================
 
 st.set_page_config(
     page_title="Car Auction Deal Finder",
-    page_icon="🚗",
     layout="wide",
 )
 
-st.title("🚗 Car Auction Deal Finder")
+st.markdown(THEME_CSS, unsafe_allow_html=True)
+
+# --- Header ---
+st.markdown(
+    '<div class="main-header">'
+    "<h1>Car Auction Deal Finder</h1>"
+    "<p>Monitoramento de leiloes US &middot; Analise de importacao &middot; Mercado BR</p>"
+    "</div>",
+    unsafe_allow_html=True,
+)
 
 # --- Sidebar ---
-st.sidebar.header("Navegacao")
-page = st.sidebar.radio("", ["Dashboard", "Deals", "Analise de Mercado", "Watchlist"])
+with st.sidebar:
+    st.markdown("### Navegacao")
+    page = st.radio(
+        "Selecionar pagina",
+        ["Dashboard", "Deals", "Analise de Mercado", "Watchlist"],
+        label_visibility="collapsed",
+    )
 
-# --- Dashboard Page ---
+# =============================================================================
+# DASHBOARD
+# =============================================================================
 if page == "Dashboard":
     stats = get_stats()
 
@@ -186,7 +316,6 @@ if page == "Dashboard":
     col5, col6, col7, col8 = st.columns(4)
     col5.metric("Listings BR", stats["br_listings"])
     col6.metric("Watchlist", stats["watchlist"])
-    from engine.currency import _cache as _currency_cache
     try:
         usd_brl = get_usd_brl_rate()
         source = _currency_cache.get("source", "fallback")
@@ -195,53 +324,48 @@ if page == "Dashboard":
     except Exception:
         col7.metric("USD/BRL", "Indisponivel")
 
-    st.subheader("Veiculos por Fonte")
+    # Sources breakdown
+    section("Veiculos por Fonte")
     if stats["sources"]:
-        source_names = {
-            "bat": "Bring a Trailer",
-            "copart": "Copart",
-            "carsandbids": "Cars & Bids",
-            "hemmings": "Hemmings",
-        }
-        chart_data = {source_names.get(k, k): v for k, v in stats["sources"].items()}
+        chart_data = {SOURCE_LABELS.get(k, k): v for k, v in stats["sources"].items()}
         st.bar_chart(chart_data)
     else:
         st.info("Nenhum veiculo no banco ainda. Execute o pipeline primeiro.")
 
-    # Top deals preview
-    st.subheader("Top 5 Deals")
+    # Top deals
+    section("Top 5 Deals")
     rows = get_deals_df()
     if rows:
-        import pandas as pd
         df = pd.DataFrame(rows[:5])
         display_cols = ["Score", "Year", "Make", "Model", "Bid (USD)", "Lucro (BRL)", "Margem %", "Source"]
         st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
     else:
         st.info("Nenhum deal encontrado.")
 
-# --- Deals Page ---
+# =============================================================================
+# DEALS
+# =============================================================================
 elif page == "Deals":
-    st.subheader("Todos os Deals Ativos")
+    section("Todos os Deals Ativos")
 
     rows = get_deals_df()
     if not rows:
         st.info("Nenhum deal encontrado. Execute o pipeline primeiro.")
     else:
-        import pandas as pd
         df = pd.DataFrame(rows)
 
         # Filters
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            min_score = st.slider("Score minimo", 0, 100, 0)
-        with col2:
-            makes = sorted(df["Make"].unique())
-            selected_makes = st.multiselect("Marcas", makes, default=makes)
-        with col3:
-            sources = sorted(df["Source"].unique())
-            selected_sources = st.multiselect("Fontes", sources, default=sources)
+        with st.container():
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                min_score = st.slider("Score minimo", 0, 100, 0)
+            with col2:
+                makes = sorted(df["Make"].unique())
+                selected_makes = st.multiselect("Marcas", makes, default=makes)
+            with col3:
+                sources = sorted(df["Source"].unique())
+                selected_sources = st.multiselect("Fontes", sources, default=sources)
 
-        # Apply filters
         mask = (
             (df["Score"] >= min_score)
             & df["Make"].isin(selected_makes)
@@ -249,9 +373,8 @@ elif page == "Deals":
         )
         filtered = df[mask]
 
-        st.write(f"Mostrando {len(filtered)} de {len(df)} deals")
+        st.caption(f"Mostrando {len(filtered)} de {len(df)} deals")
 
-        # Main table
         display_cols = [
             "Score", "Year", "Make", "Model", "Trim", "Bid (USD)",
             "Custo Total (BRL)", "Venda BR (BRL)", "Lucro (BRL)",
@@ -265,8 +388,8 @@ elif page == "Deals":
             hide_index=True,
         )
 
-        # Score breakdown for selected deal
-        st.subheader("Detalhes do Score")
+        # Score breakdown
+        section("Detalhes do Score")
         if not filtered.empty:
             selected_idx = st.selectbox(
                 "Selecionar deal",
@@ -287,13 +410,14 @@ elif page == "Deals":
 
             st.markdown(f"[Abrir listing]({selected['URL']})")
 
-# --- Market Analysis Page ---
+# =============================================================================
+# ANALISE DE MERCADO
+# =============================================================================
 elif page == "Analise de Mercado":
-    st.subheader("Analise de Mercado BR")
+    section("Analise de Mercado BR")
 
     session = get_session()
     try:
-        # Get unique makes from vehicles
         makes_result = session.execute(
             select(Vehicle.make).where(Vehicle.is_active == True).distinct()  # noqa: E712
         ).scalars().all()
@@ -307,7 +431,6 @@ elif page == "Analise de Mercado":
         with col1:
             selected_make = st.selectbox("Marca", sorted(makes_result))
         with col2:
-            # Get models for selected make
             session = get_session()
             try:
                 models_result = session.execute(
@@ -333,23 +456,20 @@ elif page == "Analise de Mercado":
             selected_year = st.selectbox("Ano", sorted(years_result, reverse=True) if years_result else [])
 
         if selected_make and selected_model and selected_year:
-            # BR Market trend
             snapshots = get_market_snapshots(selected_make, selected_model, selected_year)
             if snapshots:
-                import pandas as pd
                 snap_df = pd.DataFrame(snapshots)
                 st.line_chart(snap_df.set_index("date")[["avg", "min", "max"]])
 
                 latest = snapshots[-1]
                 col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Preco Medio", f"R${latest['avg']:,.0f}")
-                col2.metric("Minimo", f"R${latest['min']:,.0f}")
-                col3.metric("Maximo", f"R${latest['max']:,.0f}")
+                col1.metric("Preco Medio", f"R$ {latest['avg']:,.0f}")
+                col2.metric("Minimo", f"R$ {latest['min']:,.0f}")
+                col3.metric("Maximo", f"R$ {latest['max']:,.0f}")
                 col4.metric("Anuncios", latest["count"])
             else:
                 st.info("Sem dados de mercado BR para este veiculo.")
 
-            # Get auction vehicle details
             session = get_session()
             try:
                 vehicles = session.execute(
@@ -362,10 +482,9 @@ elif page == "Analise de Mercado":
                 ).scalars().all()
 
                 for v in vehicles:
-                    with st.expander(f"[{v.source}] ${v.current_bid_usd or 0:,.0f} - {v.url.split('/')[-1][:50]}"):
+                    with st.expander(f"[{v.source}] ${v.current_bid_usd or 0:,.0f} — {v.url.split('/')[-1][:50]}"):
                         history = get_price_history(v.id)
                         if history:
-                            import pandas as pd
                             hist_df = pd.DataFrame(history)
                             st.line_chart(hist_df.set_index("timestamp")["price"])
                         else:
@@ -374,9 +493,11 @@ elif page == "Analise de Mercado":
             finally:
                 session.close()
 
-# --- Watchlist Page ---
+# =============================================================================
+# WATCHLIST
+# =============================================================================
 elif page == "Watchlist":
-    st.subheader("Watchlist")
+    section("Watchlist")
 
     session = get_session()
     try:
@@ -390,7 +511,7 @@ elif page == "Watchlist":
             for item in items:
                 label = item.vin or f"{item.year or ''} {item.make or ''} {item.model or ''}".strip()
 
-                with st.expander(f"#{item.id} - {label}"):
+                with st.expander(f"#{item.id} — {label}"):
                     if item.vehicle_id:
                         vehicle = session.get(Vehicle, item.vehicle_id)
                         if vehicle:
@@ -409,7 +530,6 @@ elif page == "Watchlist":
 
                             history = get_price_history(vehicle.id)
                             if history:
-                                import pandas as pd
                                 hist_df = pd.DataFrame(history)
                                 st.line_chart(hist_df.set_index("timestamp")["price"])
 
