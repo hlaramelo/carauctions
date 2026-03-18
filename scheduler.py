@@ -428,6 +428,9 @@ _MONITOR_NORMAL_INTERVAL = 3600   # 1 hour
 _MONITOR_URGENT_INTERVAL = 300    # 5 min
 _MONITOR_URGENT_THRESHOLD = 1800  # 30 min before auction end
 
+# Anti-spam: track which urgency milestones were already sent per auction
+_urgency_alerts_sent: set[str] = set()
+
 
 def run_monitored_auctions():
     """Fetch updates for individually monitored auction listings.
@@ -525,20 +528,45 @@ def run_monitored_auctions():
             # Analyze
             analysis = engine.analyze(vehicle_obj)
 
-            # Check for alerts
+            # --- Dynamic bid-change alerts ---
+            # Threshold depends on time remaining:
+            #   >24h  → 5% change
+            #   4-24h → 3% change
+            #   <4h   → any change (1%)
+            tempo_s = analysis.get("tempo_restante_s")
             if old_bid and vehicle_obj.current_bid_usd and old_bid > 0:
                 change_pct = ((vehicle_obj.current_bid_usd - old_bid) / old_bid) * 100
-                if abs(change_pct) >= 5:
-                    reason = f"Preco mudou {change_pct:+.1f}% (${old_bid:,.0f} → ${vehicle_obj.current_bid_usd:,.0f})"
+                if tempo_s and tempo_s < 4 * 3600:
+                    threshold = 1.0
+                elif tempo_s and tempo_s < 24 * 3600:
+                    threshold = 3.0
+                else:
+                    threshold = 5.0
+
+                if abs(change_pct) >= threshold:
+                    reason = f"Bid mudou {change_pct:+.1f}% (${old_bid:,.0f} → ${vehicle_obj.current_bid_usd:,.0f})"
                     telegram.send_monitor_alert(auction, vehicle_obj, analysis, reason)
                     alerted += 1
 
-            # Urgency alert: auction ending in < 2h
-            if analysis.get("tempo_restante_s") and analysis["tempo_restante_s"] < 7200:
-                tempo_str = MonitorEngine.format_time_remaining(analysis["tempo_restante_s"])
-                reason = f"Leilao encerra em {tempo_str}"
-                telegram.send_monitor_alert(auction, vehicle_obj, analysis, reason)
-                alerted += 1
+            # --- Urgency alerts with anti-spam ---
+            # Only send at key milestones: 2h, 1h, 30min, 10min
+            if tempo_s and tempo_s > 0:
+                milestones = [
+                    (7200, 3600, "2h"),    # between 1h-2h → "2h"
+                    (3600, 1800, "1h"),    # between 30m-1h → "1h"
+                    (1800, 600, "30min"),  # between 10m-30m → "30min"
+                    (600, 0, "10min"),     # under 10m → "10min"
+                ]
+                for upper, lower, label in milestones:
+                    if lower < tempo_s <= upper:
+                        cache_key = f"urgency_{auction.id}_{label}"
+                        if cache_key not in _urgency_alerts_sent:
+                            _urgency_alerts_sent.add(cache_key)
+                            tempo_str = MonitorEngine.format_time_remaining(tempo_s)
+                            reason = f"⏰ Leilao encerra em {tempo_str}"
+                            telegram.send_monitor_alert(auction, vehicle_obj, analysis, reason)
+                            alerted += 1
+                        break
 
             checked += 1
 
