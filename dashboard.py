@@ -238,6 +238,75 @@ def get_market_snapshots(make: str, model: str, year: int):
         session.close()
 
 
+def force_fetch_auction(auction):
+    """Force-fetch data for a monitored auction. Returns (success, message)."""
+    from datetime import datetime, timezone
+    from scrapers.copart import CopartScraper
+    from scrapers.bring_a_trailer import BringATrailerScraper
+    from scrapers.cars_and_bids import CarsAndBidsScraper
+    from scrapers.hemmings import HemmingsScraper
+
+    scraper_map = {
+        "copart": CopartScraper,
+        "bat": BringATrailerScraper,
+        "carsandbids": CarsAndBidsScraper,
+        "hemmings": HemmingsScraper,
+    }
+
+    session = get_session()
+    try:
+        # Re-fetch the auction inside this session
+        auction = session.get(MonitoredAuction, auction.id)
+        scraper = scraper_map[auction.source]()
+        vehicle = scraper.fetch_single_listing(auction.url)
+        if not vehicle:
+            return False, "Nao foi possivel obter dados do listing."
+
+        existing_v = session.execute(
+            select(Vehicle).where(
+                Vehicle.source == vehicle.source,
+                Vehicle.source_id == vehicle.source_id,
+            )
+        ).scalar_one_or_none()
+
+        if existing_v:
+            if vehicle.current_bid_usd:
+                existing_v.current_bid_usd = vehicle.current_bid_usd
+            if vehicle.auction_end:
+                existing_v.auction_end = vehicle.auction_end
+            if vehicle.title_status:
+                existing_v.title_status = vehicle.title_status
+            if vehicle.year:
+                existing_v.year = vehicle.year
+            if vehicle.make:
+                existing_v.make = vehicle.make
+            if vehicle.model:
+                existing_v.model = vehicle.model
+            if vehicle.mileage:
+                existing_v.mileage = vehicle.mileage
+            if vehicle.damage_description:
+                existing_v.damage_description = vehicle.damage_description
+            existing_v.is_active = True
+            vehicle = existing_v
+        else:
+            session.add(vehicle)
+            session.flush()
+
+        auction.vehicle_id = vehicle.id
+        auction.last_checked_at = datetime.now(timezone.utc)
+        session.commit()
+
+        return True, (
+            f"Atualizado: {vehicle.year} {vehicle.make} {vehicle.model} — "
+            f"Bid: ${vehicle.current_bid_usd or 0:,.0f}"
+        )
+    except Exception as e:
+        session.rollback()
+        return False, f"Erro no fetch: {e}"
+    finally:
+        session.close()
+
+
 SOURCE_LABELS = {
     "bat": "Bring a Trailer",
     "copart": "Copart",
@@ -502,6 +571,28 @@ elif page == "Monitorados":
         else:
             st.error("URL nao reconhecida. Use URLs do Copart, BaT, Cars & Bids ou Hemmings.")
 
+    # Fetch all button
+    if st.button("Forcar Fetch Todos"):
+        session_tmp = get_session()
+        try:
+            all_auctions = session_tmp.execute(
+                select(MonitoredAuction).where(MonitoredAuction.is_active == True)  # noqa: E712
+            ).scalars().all()
+            if not all_auctions:
+                st.info("Nenhum leilao monitorado.")
+            else:
+                progress = st.progress(0)
+                for i, a in enumerate(all_auctions):
+                    ok, msg = force_fetch_auction(a)
+                    if ok:
+                        st.success(f"#{a.id}: {msg}")
+                    else:
+                        st.warning(f"#{a.id}: {msg}")
+                    progress.progress((i + 1) / len(all_auctions))
+                st.rerun()
+        finally:
+            session_tmp.close()
+
     # List monitored auctions
     session = get_session()
     try:
@@ -572,17 +663,38 @@ elif page == "Monitorados":
                     },
                 )
 
-                # Expanders with details
+                # Expanders with details and fetch buttons
                 section("Detalhes")
                 for a in auctions:
                     if not a.vehicle_id:
+                        label = f"[{a.source}] #{a.id} — Aguardando fetch"
+                        with st.expander(label):
+                            st.write(f"**URL:** {a.url}")
+                            if st.button("Forcar Fetch", key=f"fetch_{a.id}"):
+                                with st.spinner("Buscando dados..."):
+                                    ok, msg = force_fetch_auction(a)
+                                if ok:
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
                         continue
+
                     vehicle = session.get(Vehicle, a.vehicle_id)
                     if not vehicle:
                         continue
 
                     label = f"[{a.source}] {vehicle.year} {vehicle.make} {vehicle.model}"
                     with st.expander(label):
+                        if st.button("Forcar Fetch", key=f"fetch_{a.id}"):
+                            with st.spinner("Buscando dados..."):
+                                ok, msg = force_fetch_auction(a)
+                            if ok:
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+
                         analysis = monitor_engine.analyze(vehicle)
 
                         col1, col2, col3, col4 = st.columns(4)
