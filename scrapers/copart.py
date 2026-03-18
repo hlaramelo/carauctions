@@ -1,8 +1,7 @@
 """Copart scraper - US salvage/clean title auction listings.
 
-Copart uses a dynamic JS frontend, so we rely on their search API
-which the frontend calls. This avoids needing Selenium/Playwright.
-Falls back to HTML parsing when API is blocked (403).
+Uses Selenium with headless Chromium to render JS-heavy pages.
+Falls back to API, then HTML parsing, then URL slug extraction.
 """
 
 import json
@@ -17,6 +16,36 @@ from loguru import logger
 from config import load_settings
 from models.vehicle import Vehicle
 from scrapers.base import BaseScraper
+
+
+def _get_selenium_driver():
+    """Create a headless Chromium Selenium driver."""
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+
+    # Try common chromedriver locations
+    for driver_path in ["/usr/bin/chromedriver", "/usr/lib/chromium/chromedriver"]:
+        try:
+            service = Service(executable_path=driver_path)
+            return webdriver.Chrome(service=service, options=options)
+        except Exception:
+            continue
+
+    # Fallback: let Selenium find it
+    return webdriver.Chrome(options=options)
 
 # Copart's internal search API used by their frontend
 COPART_SEARCH_URL = "https://www.copart.com/public/lots/search"
@@ -84,29 +113,243 @@ class CopartScraper(BaseScraper):
         except ValueError:
             logger.error("[Copart] Invalid JSON from detail API")
 
-        # Fallback 2: try HTML scraping
+        # Fallback 2: Selenium with headless Chromium (renders JS)
         try:
-            logger.info("[Copart] Trying HTML scraping fallback...")
-            time.sleep(self.request_delay)
-            html_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-            }
-            resp = requests.get(url, headers=html_headers, timeout=15)
-            if resp.status_code == 200:
-                vehicle = self._parse_from_html(resp.text, lot_number, url)
-                if vehicle:
-                    logger.info(f"[Copart] HTML parsed: {vehicle.year} {vehicle.make} {vehicle.model} bid=${vehicle.current_bid_usd}")
-                    return vehicle
+            logger.info("[Copart] Trying Selenium headless browser...")
+            vehicle = self._fetch_with_selenium(url, lot_number)
+            if vehicle and vehicle.current_bid_usd:
+                logger.info(
+                    f"[Copart] Selenium success: {vehicle.year} {vehicle.make} {vehicle.model} "
+                    f"bid=${vehicle.current_bid_usd}"
+                )
+                return vehicle
         except Exception as e:
-            logger.warning(f"[Copart] HTML scraping failed: {e}")
+            logger.warning(f"[Copart] Selenium fallback failed: {e}")
 
         # Fallback 3: parse info from the URL slug itself
         vehicle = self._parse_from_url(url, lot_number)
         if vehicle:
             logger.info(f"[Copart] Parsed from URL: {vehicle.year} {vehicle.make} {vehicle.model}")
         return vehicle
+
+    def _fetch_with_selenium(self, url: str, lot_number: str) -> Vehicle | None:
+        """Use Selenium headless Chromium to render Copart page and extract data."""
+        driver = None
+        try:
+            driver = _get_selenium_driver()
+            driver.get(url)
+
+            # Wait for page to render (Copart loads data via JS)
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+
+            # Wait up to 15s for bid element to appear
+            try:
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "[data-uname='lotdetailCurrentBidValue'], .bid-price, #lot-details"))
+                )
+            except Exception:
+                logger.debug("[Copart] Timeout waiting for bid element, parsing what we have")
+
+            time.sleep(2)  # Extra wait for dynamic content
+            html = driver.page_source
+
+            soup = BeautifulSoup(html, "lxml")
+
+            # Parse title for year/make/model
+            title_el = soup.find("h1") or soup.find("title")
+            title_text = title_el.get_text(strip=True) if title_el else ""
+            logger.debug(f"[Copart/Selenium] Page title: {title_text}")
+
+            year, make, model = None, "", ""
+            year_m = re.search(r"(\d{4})", title_text)
+            if year_m:
+                year = int(year_m.group(1))
+                after_year = title_text.split(str(year), 1)[-1].strip()
+                # Remove trailing lot info like "Lot #78272755"
+                after_year = re.sub(r"\s*Lot\s*#?\d+.*", "", after_year, flags=re.I).strip()
+                parts = after_year.split(None, 1)
+                if parts:
+                    make = parts[0]
+                    model = parts[1] if len(parts) > 1 else ""
+
+            # Current bid
+            current_bid = None
+            for selector in [
+                "[data-uname='lotdetailCurrentBidValue']",
+                ".bid-price",
+                "[data-uname='lotdetailBidNowValue']",
+            ]:
+                el = soup.select_one(selector)
+                if el:
+                    price_text = el.get_text(strip=True)
+                    price_clean = re.sub(r"[^\d.]", "", price_text)
+                    if price_clean:
+                        current_bid = float(price_clean)
+                        break
+
+            # Also try searching for price pattern near "Current bid" text
+            if not current_bid:
+                for el in soup.find_all(string=re.compile(r"\$[\d,]+")):
+                    price_clean = re.sub(r"[^\d.]", "", el.strip())
+                    if price_clean:
+                        val = float(price_clean)
+                        if 10 < val < 1_000_000:  # Reasonable bid range
+                            current_bid = val
+                            break
+
+            # Mileage
+            mileage = None
+            for label_text in ["Odometer", "odometer"]:
+                label_el = soup.find(string=re.compile(label_text, re.I))
+                if label_el:
+                    parent = label_el.find_parent("tr") or label_el.find_parent("div") or label_el.find_parent()
+                    if parent:
+                        text = parent.get_text()
+                        mi_match = re.search(r"([\d,]+)\s*(?:mi|mile|actual|exempt)", text, re.I)
+                        if mi_match:
+                            mileage = int(mi_match.group(1).replace(",", ""))
+                            break
+
+            # Primary damage
+            damage = None
+            for label_text in ["Primary damage", "Primary Damage"]:
+                label_el = soup.find(string=re.compile(label_text, re.I))
+                if label_el:
+                    parent = label_el.find_parent("tr") or label_el.find_parent("div") or label_el.find_parent()
+                    if parent:
+                        # Get text after the label
+                        full_text = parent.get_text(separator="|")
+                        parts = full_text.split("|")
+                        for i, p in enumerate(parts):
+                            if "primary damage" in p.lower() and i + 1 < len(parts):
+                                damage = parts[i + 1].strip()
+                                break
+                    break
+
+            # Secondary damage
+            secondary = None
+            label_el = soup.find(string=re.compile("Secondary damage", re.I))
+            if label_el:
+                parent = label_el.find_parent("tr") or label_el.find_parent("div") or label_el.find_parent()
+                if parent:
+                    full_text = parent.get_text(separator="|")
+                    parts = full_text.split("|")
+                    for i, p in enumerate(parts):
+                        if "secondary damage" in p.lower() and i + 1 < len(parts):
+                            secondary = parts[i + 1].strip()
+                            break
+            if damage and secondary:
+                damage = f"{damage}, {secondary}"
+
+            # Location (Sale name)
+            location_state, location_city = None, None
+            sale_el = soup.find(string=re.compile("Sale name|Location", re.I))
+            if sale_el:
+                parent = sale_el.find_parent()
+                if parent:
+                    text = parent.get_text()
+                    loc_match = re.search(r"(\w{2})\s*-\s*([A-Za-z\s]+)", text)
+                    if loc_match:
+                        location_state = loc_match.group(1).upper()
+                        location_city = loc_match.group(2).strip().title()
+
+            # VIN
+            vin = None
+            vin_el = soup.find(string=re.compile(r"VIN", re.I))
+            if vin_el:
+                parent = vin_el.find_parent()
+                if parent:
+                    vin_match = re.search(r"[A-HJ-NPR-Z0-9]{17}", parent.get_text())
+                    if vin_match:
+                        vin = vin_match.group(0)
+
+            # Engine
+            engine_cc = None
+            engine_el = soup.find(string=re.compile("Engine type|Engine", re.I))
+            if engine_el:
+                parent = engine_el.find_parent()
+                if parent:
+                    eng_match = re.search(r"(\d+\.?\d*)\s*[lL]", parent.get_text())
+                    if eng_match:
+                        engine_cc = int(float(eng_match.group(1)) * 1000)
+
+            # Title status
+            title_status = "unknown"
+            title_el = soup.find(string=re.compile("Title code|Title", re.I))
+            if title_el:
+                parent = title_el.find_parent()
+                if parent:
+                    text = parent.get_text().lower()
+                    if "clean" in text or "certificate" in text:
+                        title_status = "clean"
+                    elif "salvage" in text:
+                        title_status = "salvage"
+                    elif "rebuilt" in text:
+                        title_status = "rebuilt"
+
+            # Auction end date
+            auction_end = None
+            countdown_el = soup.find(string=re.compile("Auction countdown|Sale date", re.I))
+            if countdown_el:
+                parent = countdown_el.find_parent()
+                if parent:
+                    text = parent.get_text()
+                    # Parse "1D 17H 21min" style countdown
+                    d_match = re.search(r"(\d+)\s*[dD]", text)
+                    h_match = re.search(r"(\d+)\s*[hH]", text)
+                    m_match = re.search(r"(\d+)\s*min", text, re.I)
+                    if d_match or h_match or m_match:
+                        days = int(d_match.group(1)) if d_match else 0
+                        hours = int(h_match.group(1)) if h_match else 0
+                        mins = int(m_match.group(1)) if m_match else 0
+                        from datetime import timedelta
+                        auction_end = datetime.now(timezone.utc) + timedelta(days=days, hours=hours, minutes=mins)
+
+            # Fallback: get URL-based data for anything missing
+            url_vehicle = self._parse_from_url(url, lot_number)
+
+            if not year and url_vehicle:
+                year = url_vehicle.year
+                make = url_vehicle.make
+                model = url_vehicle.model
+
+            if not year:
+                return None
+
+            logger.debug(
+                f"[Copart/Selenium] Extracted: bid={current_bid}, mi={mileage}, "
+                f"damage={damage}, loc={location_state}, vin={vin}"
+            )
+
+            return Vehicle(
+                source=self.SOURCE_NAME,
+                source_id=f"copart_{lot_number}",
+                url=f"https://www.copart.com/lot/{lot_number}",
+                make=(make or "").title(),
+                model=(model or "").title(),
+                year=year,
+                trim=None,
+                vin=vin,
+                current_bid_usd=current_bid,
+                mileage=mileage,
+                title_status=title_status or (url_vehicle.title_status if url_vehicle else "unknown"),
+                damage_description=damage,
+                location_state=location_state or (url_vehicle.location_state if url_vehicle else None),
+                location_city=location_city,
+                engine_cc=engine_cc,
+                auction_end=auction_end,
+            )
+        except Exception as e:
+            logger.error(f"[Copart] Selenium error: {e}")
+            return None
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
     def _parse_from_html(self, html: str, lot_number: str, url: str) -> Vehicle | None:
         """Parse vehicle data from Copart HTML page."""

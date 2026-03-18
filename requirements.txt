@@ -20,6 +20,9 @@ google-auth-oauthlib>=1.2
 streamlit>=1.30
 pandas>=2.1
 
+# Browser automation (Copart scraping)
+selenium>=4.15
+
 # Database (cloud PostgreSQL support)
 psycopg2-binary>=2.9
 
