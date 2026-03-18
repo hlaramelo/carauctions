@@ -891,12 +891,28 @@ elif page == "Monitorados":
                                 st.success("Dados atualizados!")
                                 st.rerun()
 
-                        # Price history chart
+                        # Price history
+                        st.divider()
                         history = get_price_history(vehicle.id)
-                        if history:
-                            st.write("**Historico de Bid:**")
+                        if history and len(history) >= 2:
+                            st.write("**Historico de Bids:**")
                             hist_df = pd.DataFrame(history)
                             st.line_chart(hist_df.set_index("timestamp")["price"])
+                            # Show table of recorded bids
+                            with st.expander(f"Ver {len(history)} registos"):
+                                tbl = pd.DataFrame(history)
+                                tbl.columns = ["Data/Hora", "Bid (USD)"]
+                                tbl["Bid (USD)"] = tbl["Bid (USD)"].apply(lambda x: f"${x:,.0f}")
+                                tbl["Data/Hora"] = pd.to_datetime(tbl["Data/Hora"]).dt.strftime("%d/%m %H:%M")
+                                st.dataframe(tbl, use_container_width=True, hide_index=True)
+                        elif history and len(history) == 1:
+                            st.info(
+                                f"1 registo de bid: **${history[0]['price']:,.0f}** "
+                                f"em {history[0]['timestamp'].strftime('%d/%m %H:%M') if hasattr(history[0]['timestamp'], 'strftime') else history[0]['timestamp']}. "
+                                "Faca mais fetches para ver a evolucao do preco."
+                            )
+                        else:
+                            st.caption("Sem historico de bids. Clique 'Atualizar' para registar.")
     finally:
         session.close()
 
