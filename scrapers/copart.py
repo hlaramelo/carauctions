@@ -49,6 +49,7 @@ class CopartScraper(BaseScraper):
         lot_number = lot_match.group(1)
         logger.info(f"[Copart] Fetching single lot: {lot_number}")
 
+        # Try detail API
         try:
             time.sleep(self.request_delay)
             response = self.session.get(
@@ -56,24 +57,102 @@ class CopartScraper(BaseScraper):
                 params={"lotNumber": lot_number},
                 timeout=15,
             )
-            if response.status_code == 403:
+            if response.status_code != 403:
+                response.raise_for_status()
+                data = response.json()
+                logger.debug(f"[Copart] Detail API keys: {list(data.get('data', {}).keys())}")
+
+                # Try multiple possible structures
+                lot_data = (
+                    data.get("data", {}).get("lotDetails")
+                    or data.get("data", {}).get("lotDetail")
+                    or data.get("data", {})
+                )
+                if lot_data:
+                    logger.debug(f"[Copart] Lot data keys: {list(lot_data.keys())[:20]}")
+                    vehicle = self._parse_result(lot_data)
+                    if vehicle:
+                        return vehicle
+                    logger.warning(f"[Copart] Parse returned None, lot_data sample: make={lot_data.get('mkn')}, makeName={lot_data.get('makeName')}, ln={lot_data.get('ln')}")
+            else:
                 logger.warning("[Copart] Blocked (403) on detail API")
-                return None
-            response.raise_for_status()
-            data = response.json()
         except requests.RequestException as e:
             logger.error(f"[Copart] Detail API failed for lot {lot_number}: {e}")
-            return None
         except ValueError:
             logger.error("[Copart] Invalid JSON from detail API")
+
+        # Fallback: try to parse info from the URL slug itself
+        vehicle = self._parse_from_url(url, lot_number)
+        if vehicle:
+            logger.info(f"[Copart] Parsed from URL: {vehicle.year} {vehicle.make} {vehicle.model}")
+        return vehicle
+
+    def _parse_from_url(self, url: str, lot_number: str) -> Vehicle | None:
+        """Fallback: extract basic info from URL slug when API fails."""
+        # URL pattern: /lot/78272755/clean-title-2006-mercedes-benz-slk-55-amg-pa-philadelphia
+        slug_match = re.search(r"/lot/\d+/?\??[^/]*$", url)
+        if not slug_match:
+            # Try from Photos URL pattern
+            slug_match = re.search(r"/lot/\d+/Photos/(.+?)(?:\?|$)", url)
+        else:
+            slug_match = re.search(r"/lot/\d+/(.+?)(?:\?|$)", url)
+
+        if not slug_match:
             return None
 
-        lot_data = data.get("data", {}).get("lotDetails", data.get("data", {}))
-        if not lot_data:
-            logger.warning(f"[Copart] No data returned for lot {lot_number}")
+        slug = slug_match.group(1).lower()
+        # e.g. "clean-title-2006-mercedes-benz-slk-55-amg-pa-philadelphia"
+
+        # Extract title status
+        title_status = "unknown"
+        for ts in ["clean-title", "salvage-title", "rebuilt-title"]:
+            if ts in slug:
+                title_status = ts.replace("-title", "")
+                slug = slug.replace(ts + "-", "")
+                break
+
+        # Extract year (4 digits)
+        year_match = re.search(r"(\d{4})", slug)
+        if not year_match:
+            return None
+        year = int(year_match.group(1))
+        slug = slug[:year_match.start()] + slug[year_match.end():]
+        slug = slug.strip("-")
+
+        # Remaining slug has make-model-...-state-city
+        # Remove trailing state abbreviation and city
+        parts = [p for p in slug.split("-") if p]
+        # Remove last 1-2 parts that are likely state/city
+        if len(parts) >= 3:
+            # Check if second to last is a 2-letter state
+            if len(parts[-2]) == 2:
+                location_state = parts[-2].upper()
+                parts = parts[:-2]
+            elif len(parts[-1]) == 2:
+                location_state = parts[-1].upper()
+                parts = parts[:-1]
+            else:
+                location_state = None
+        else:
+            location_state = None
+
+        if not parts:
             return None
 
-        return self._parse_result(lot_data)
+        # First part is make, rest is model
+        make = parts[0]
+        model = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+        return Vehicle(
+            source=self.SOURCE_NAME,
+            source_id=f"copart_{lot_number}",
+            url=f"https://www.copart.com/lot/{lot_number}",
+            make=make.title(),
+            model=model.title() if model else "",
+            year=year,
+            title_status=title_status,
+            location_state=location_state,
+        )
 
     def scrape_listings(self) -> list[Vehicle]:
         """Scrape active auction listings from Copart matching our filters."""
@@ -148,62 +227,77 @@ class CopartScraper(BaseScraper):
         return vehicles
 
     def _parse_result(self, item: dict) -> Vehicle | None:
-        """Parse a single Copart search result."""
+        """Parse a single Copart result (handles both search API and detail API fields)."""
         try:
-            lot_number = str(item.get("ln", ""))
+            # Lot number: search API uses "ln", detail API uses "ln" or "lotNumberStr"
+            lot_number = str(item.get("ln") or item.get("lotNumberStr") or "")
             if not lot_number:
                 return None
 
-            make = item.get("mkn", "")
-            model = item.get("mmod", "")
-            year = item.get("lcy", 0)
+            # Make/Model/Year: search API uses abbreviated, detail API uses full names
+            make = item.get("mkn") or item.get("mkn") or item.get("makeName") or item.get("makeDesc") or ""
+            model = item.get("mmod") or item.get("modelName") or item.get("modelDesc") or ""
+            year = item.get("lcy") or item.get("lcy") or item.get("lotYear") or item.get("yr") or 0
 
             if not make or not year:
                 return None
 
-            # Current bid
-            current_bid = item.get("dynamicLotDetails", {}).get("currentBid", 0)
-            buy_now = item.get("bnp", None)
+            # Current bid: search API nests in dynamicLotDetails, detail API may have it at top level
+            dynamic = item.get("dynamicLotDetails") or {}
+            current_bid = (
+                dynamic.get("currentBid")
+                or item.get("currentBid")
+                or item.get("highBidAmount")
+                or 0
+            )
+            buy_now = item.get("bnp") or item.get("buyNowPrice") or None
 
             # Mileage
-            mileage_str = str(item.get("orr", "0"))
+            mileage_str = str(item.get("orr") or item.get("odometerReading") or item.get("odometer") or "0")
             mileage = self._parse_mileage(mileage_str)
 
             # Title
-            title_raw = item.get("tims", "")
+            title_raw = item.get("tims") or item.get("titleStatus") or item.get("titleCode") or ""
             title_status = self._normalize_title_status(title_raw)
 
             # Damage
-            primary_damage = item.get("dd", "")
-            secondary_damage = item.get("sdd", "")
+            primary_damage = item.get("dd") or item.get("primaryDamage") or item.get("damageDescription") or ""
+            secondary_damage = item.get("sdd") or item.get("secondaryDamage") or ""
             damage_desc = ", ".join(filter(None, [primary_damage, secondary_damage]))
 
             # Location
-            location = item.get("yn", "")
+            location = item.get("yn") or item.get("yardName") or item.get("facilityName") or ""
             state_match = re.search(r"- (\w{2})$", location) if location else None
             location_state = state_match.group(1) if state_match else None
             location_city = location.split(" - ")[0].strip() if location else None
 
             # Auction end
             auction_end = None
-            auction_ts = item.get("dynamicLotDetails", {}).get("saleDate")
+            auction_ts = dynamic.get("saleDate") or item.get("saleDate") or item.get("auctionDate")
             if auction_ts:
                 try:
-                    auction_end = datetime.fromtimestamp(auction_ts / 1000, tz=timezone.utc)
+                    ts = auction_ts if isinstance(auction_ts, (int, float)) else int(auction_ts)
+                    # Copart timestamps are in milliseconds
+                    if ts > 1e12:
+                        ts = ts / 1000
+                    auction_end = datetime.fromtimestamp(ts, tz=timezone.utc)
                 except (ValueError, TypeError, OSError):
                     pass
 
             # Images
-            image_url = item.get("tims", "")
-            if not image_url:
+            image_url = item.get("imageUrl") or item.get("tims") or ""
+            if not image_url or "http" not in str(image_url):
                 image_url = f"https://cs.copart.com/v1/AUTH_svc.pdoc00001/{lot_number}/1.jpg"
 
             # Engine
-            engine_str = item.get("egn", "")
+            engine_str = item.get("egn") or item.get("engineSize") or item.get("engineType") or ""
             engine_cc = self._parse_engine_cc(engine_str)
 
             # VIN
-            vin = item.get("fv", "")
+            vin = item.get("fv") or item.get("vin") or ""
+
+            # Trim
+            trim = item.get("trim") or item.get("seriesName") or ""
 
             url = f"https://www.copart.com/lot/{lot_number}"
 
@@ -213,6 +307,7 @@ class CopartScraper(BaseScraper):
                 url=url,
                 make=make.title(),
                 model=model.title() if model else "",
+                trim=trim.title() if trim else None,
                 year=int(year),
                 vin=vin if vin and len(vin) == 17 else None,
                 current_bid_usd=float(current_bid) if current_bid else None,

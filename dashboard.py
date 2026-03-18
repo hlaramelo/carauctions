@@ -238,6 +238,52 @@ def get_market_snapshots(make: str, model: str, year: int):
         session.close()
 
 
+def _describe_from_url(url: str) -> dict:
+    """Extract car description from a listing URL slug for display purposes."""
+    import re
+    info: dict = {}
+
+    # Copart: /lot/78272755/Photos/clean-title-2006-mercedes-benz-slk-55-amg-pa-philadelphia
+    slug_match = re.search(r"/lot/\d+(?:/Photos)?/(.+?)(?:\?|$)", url)
+    if slug_match:
+        slug = slug_match.group(1).lower()
+        # Title status
+        for ts in ["clean-title", "salvage-title", "rebuilt-title"]:
+            if ts in slug:
+                info["title"] = ts.replace("-title", "")
+                slug = slug.replace(ts + "-", "")
+                break
+        # Year
+        year_m = re.search(r"(\d{4})", slug)
+        if year_m:
+            info["year"] = int(year_m.group(1))
+            slug = slug[:year_m.start()] + slug[year_m.end():]
+            slug = slug.strip("-")
+        # Make / model from remaining slug (strip trailing state-city)
+        parts = [p for p in slug.split("-") if p]
+        if len(parts) >= 3 and len(parts[-2]) == 2:
+            parts = parts[:-2]
+        elif len(parts) >= 2 and len(parts[-1]) == 2:
+            parts = parts[:-1]
+        if parts:
+            info["make"] = parts[0].title()
+            info["model"] = " ".join(p.title() for p in parts[1:]) if len(parts) > 1 else ""
+        return info
+
+    # BaT / Cars & Bids: slug usually has make-model-year
+    slug_match = re.search(r"/([^/]+?)/?(?:\?|$)", url)
+    if slug_match:
+        slug = slug_match.group(1)
+        parts = slug.replace("_", "-").split("-")
+        year_m = re.search(r"(\d{4})", slug)
+        if year_m:
+            info["year"] = int(year_m.group(1))
+        info["make"] = parts[0].title() if parts else ""
+        info["model"] = " ".join(p.title() for p in parts[1:4]) if len(parts) > 1 else ""
+
+    return info
+
+
 def force_fetch_auction(auction):
     """Force-fetch data for a monitored auction. Returns (success, message)."""
     from datetime import datetime, timezone
@@ -607,17 +653,19 @@ elif page == "Monitorados":
             rows = []
             for a in auctions:
                 if not a.vehicle_id:
+                    # Try to extract info from URL for display
+                    desc = _describe_from_url(a.url)
                     rows.append({
                         "ID": a.id,
                         "Source": a.source,
-                        "Year": 0,
-                        "Make": "—",
-                        "Model": "Aguardando fetch",
+                        "Year": desc.get("year", 0),
+                        "Make": desc.get("make", "—"),
+                        "Model": desc.get("model", "Aguardando fetch"),
                         "Bid (USD)": 0,
                         "Custo Total (BRL)": 0,
                         "Lucro (BRL)": 0,
                         "Margem %": 0.0,
-                        "Titulo": "—",
+                        "Titulo": desc.get("title", "—"),
                         "Tempo": "—",
                         "URL": a.url,
                     })
@@ -667,7 +715,9 @@ elif page == "Monitorados":
                 section("Detalhes")
                 for a in auctions:
                     if not a.vehicle_id:
-                        label = f"[{a.source}] #{a.id} — Aguardando fetch"
+                        desc = _describe_from_url(a.url)
+                        desc_str = f"{desc.get('year', '')} {desc.get('make', '')} {desc.get('model', '')}".strip()
+                        label = f"[{a.source}] #{a.id} — {desc_str or 'Aguardando fetch'}"
                         with st.expander(label):
                             st.write(f"**URL:** {a.url}")
                             if st.button("Forcar Fetch", key=f"fetch_{a.id}"):
