@@ -30,29 +30,28 @@ THEME_CSS = """
         font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
     }
 
-    /* Tighter header */
+    /* Header */
     .main-header {
-        padding: 1.5rem 0 0.5rem 0;
-        border-bottom: 2px solid #1a1a2e;
+        padding: 1.5rem 0 0.75rem 0;
+        border-bottom: 2px solid rgba(255, 255, 255, 0.15);
         margin-bottom: 1.5rem;
     }
     .main-header h1 {
         font-size: 1.6rem;
         font-weight: 700;
-        color: #1a1a2e;
         letter-spacing: -0.02em;
         margin: 0;
     }
     .main-header p {
         font-size: 0.85rem;
-        color: #6b7280;
-        margin: 0.2rem 0 0 0;
+        opacity: 0.5;
+        margin: 0.25rem 0 0 0;
     }
 
     /* Metric cards */
     [data-testid="stMetric"] {
-        background: #f8f9fb;
-        border: 1px solid #e5e7eb;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
         border-radius: 8px;
         padding: 0.8rem 1rem;
     }
@@ -61,54 +60,26 @@ THEME_CSS = """
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.04em;
-        color: #6b7280;
+        opacity: 0.6;
     }
     [data-testid="stMetricValue"] {
         font-size: 1.3rem;
         font-weight: 700;
-        color: #1a1a2e;
     }
 
     /* Section headers */
     .section-header {
         font-size: 1rem;
         font-weight: 600;
-        color: #1a1a2e;
         padding: 0.8rem 0 0.4rem 0;
-        border-bottom: 1px solid #e5e7eb;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
         margin: 1.5rem 0 1rem 0;
-    }
-
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background: #1a1a2e;
-    }
-    [data-testid="stSidebar"] * {
-        color: #e5e7eb !important;
-    }
-    [data-testid="stSidebar"] .stRadio label {
-        font-size: 0.9rem;
-        font-weight: 500;
     }
 
     /* Dataframes */
     .stDataFrame {
         border-radius: 8px;
         overflow: hidden;
-    }
-
-    /* Subtle info boxes */
-    .stAlert {
-        border-radius: 8px;
-    }
-
-    /* Filter containers */
-    .filter-bar {
-        background: #f8f9fb;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 1rem;
-        margin-bottom: 1rem;
     }
 
     /* Hide default Streamlit branding */
@@ -151,25 +122,25 @@ def get_deals_df():
 
             rows.append({
                 "Score": round(deal.score, 1),
-                "Year": vehicle.year,
+                "Year": int(vehicle.year),
                 "Make": vehicle.make,
                 "Model": vehicle.model,
                 "Trim": vehicle.trim or "",
-                "Bid (USD)": round(deal.auction_price_usd),
-                "Custo Total (BRL)": round(deal.total_landed_cost_brl),
-                "Venda BR (BRL)": round(deal.estimated_sale_price_brl),
-                "Lucro (BRL)": round(deal.estimated_profit_brl),
+                "Bid (USD)": int(round(deal.auction_price_usd)),
+                "Custo Total (BRL)": int(round(deal.total_landed_cost_brl)),
+                "Venda BR (BRL)": int(round(deal.estimated_sale_price_brl)),
+                "Lucro (BRL)": int(round(deal.estimated_profit_brl)),
                 "Margem %": round(deal.margin_pct, 1),
-                "Mileage": vehicle.mileage or 0,
+                "Mileage": int(vehicle.mileage or 0),
                 "Title": vehicle.title_status or "N/A",
                 "Source": vehicle.source,
                 "Cambio": round(deal.usd_brl_rate, 2),
                 "URL": vehicle.url,
-                "Score Margin": breakdown.get("margin", 0),
-                "Score Liquidity": breakdown.get("liquidity", 0),
-                "Score Condition": breakdown.get("condition", 0),
-                "Score Time": breakdown.get("time_remaining", 0),
-                "Score History": breakdown.get("price_history", 0),
+                "Score Margin": round(breakdown.get("margin", 0), 1),
+                "Score Liquidity": round(breakdown.get("liquidity", 0), 1),
+                "Score Condition": round(breakdown.get("condition", 0), 1),
+                "Score Time": round(breakdown.get("time_remaining", 0), 1),
+                "Score History": round(breakdown.get("price_history", 0), 1),
             })
 
         return rows
@@ -338,7 +309,17 @@ if page == "Dashboard":
     if rows:
         df = pd.DataFrame(rows[:5])
         display_cols = ["Score", "Year", "Make", "Model", "Bid (USD)", "Lucro (BRL)", "Margem %", "Source"]
-        st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
+        st.dataframe(
+            df[display_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Score": st.column_config.NumberColumn(format="%.1f"),
+                "Bid (USD)": st.column_config.NumberColumn(format="$ %d"),
+                "Lucro (BRL)": st.column_config.NumberColumn(format="R$ %d"),
+                "Margem %": st.column_config.NumberColumn(format="%.1f %%"),
+            },
+        )
     else:
         st.info("Nenhum deal encontrado.")
 
@@ -381,11 +362,19 @@ elif page == "Deals":
             "Margem %", "Mileage", "Title", "Source", "Cambio",
         ]
         st.dataframe(
-            filtered[display_cols].style.background_gradient(
-                subset=["Score", "Margem %"], cmap="RdYlGn"
-            ),
+            filtered[display_cols],
             use_container_width=True,
             hide_index=True,
+            column_config={
+                "Score": st.column_config.NumberColumn(format="%.1f"),
+                "Bid (USD)": st.column_config.NumberColumn(format="$ %d"),
+                "Custo Total (BRL)": st.column_config.NumberColumn(format="R$ %d"),
+                "Venda BR (BRL)": st.column_config.NumberColumn(format="R$ %d"),
+                "Lucro (BRL)": st.column_config.NumberColumn(format="R$ %d"),
+                "Margem %": st.column_config.NumberColumn(format="%.1f %%"),
+                "Mileage": st.column_config.NumberColumn(format="%d km"),
+                "Cambio": st.column_config.NumberColumn(format="%.2f"),
+            },
         )
 
         # Score breakdown
