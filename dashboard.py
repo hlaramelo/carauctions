@@ -466,7 +466,7 @@ with st.sidebar:
     st.markdown("### Navegacao")
     page = st.radio(
         "Selecionar pagina",
-        ["Dashboard", "Deals", "Monitorados", "Analise de Mercado", "Watchlist", "Calculadora ROI"],
+        ["Dashboard", "Deals", "Monitorados", "Analise de Mercado", "Calculadora ROI"],
         label_visibility="collapsed",
     )
 
@@ -1003,6 +1003,53 @@ elif page == "Monitorados":
                                     )
                                     st.success("Dados atualizados!")
                                     st.rerun()
+
+        # =================================================================
+        # WATCHLIST (Telegram /watch) — integrado em Monitorados
+        # =================================================================
+        st.divider()
+        section("Watchlist (via Telegram)")
+
+        watch_items = session.execute(
+            select(WatchlistItem).where(WatchlistItem.is_active == True)  # noqa: E712
+        ).scalars().all()
+
+        if not watch_items:
+            st.caption("Nenhum item na watchlist. Adicione via Telegram com /watch.")
+        else:
+            for item in watch_items:
+                label = item.vin or f"{item.year or ''} {item.make or ''} {item.model or ''}".strip()
+
+                with st.expander(f"[WATCH] #{item.id} — {label}"):
+                    if item.vehicle_id:
+                        vehicle = session.get(Vehicle, item.vehicle_id)
+                        if vehicle:
+                            deal = session.execute(
+                                select(Deal).where(
+                                    Deal.vehicle_id == vehicle.id,
+                                    Deal.is_active == True,  # noqa: E712
+                                )
+                            ).scalar_one_or_none()
+
+                            col1, col2, col3 = st.columns(3)
+                            col1.write(f"**Bid:** ${vehicle.current_bid_usd or 0:,.0f}")
+                            col2.write(f"**Source:** {vehicle.source}")
+                            if deal:
+                                col3.write(f"**Score:** {deal.score:.0f} | **Margem:** {deal.margin_pct:.1f}%")
+
+                            history = get_price_history(vehicle.id)
+                            if history:
+                                hist_df = pd.DataFrame(history)
+                                st.line_chart(hist_df.set_index("timestamp")["price"])
+
+                            st.markdown(f"[Abrir listing]({vehicle.url})")
+                    else:
+                        st.write("Veiculo ainda nao encontrado no banco de dados.")
+
+                    if item.notes:
+                        st.caption(f"Notas: {item.notes}")
+                    st.caption(f"Adicionado: {item.created_at.strftime('%d/%m/%Y %H:%M')}")
+
     finally:
         session.close()
 
@@ -1088,54 +1135,6 @@ elif page == "Analise de Mercado":
                         st.markdown(f"[Ver listing]({v.url})")
             finally:
                 session.close()
-
-# =============================================================================
-# WATCHLIST
-# =============================================================================
-elif page == "Watchlist":
-    section("Watchlist")
-
-    session = get_session()
-    try:
-        items = session.execute(
-            select(WatchlistItem).where(WatchlistItem.is_active == True)  # noqa: E712
-        ).scalars().all()
-
-        if not items:
-            st.info("Watchlist vazia. Adicione itens via Telegram com /watch.")
-        else:
-            for item in items:
-                label = item.vin or f"{item.year or ''} {item.make or ''} {item.model or ''}".strip()
-
-                with st.expander(f"#{item.id} — {label}"):
-                    if item.vehicle_id:
-                        vehicle = session.get(Vehicle, item.vehicle_id)
-                        if vehicle:
-                            deal = session.execute(
-                                select(Deal).where(
-                                    Deal.vehicle_id == vehicle.id,
-                                    Deal.is_active == True,  # noqa: E712
-                                )
-                            ).scalar_one_or_none()
-
-                            col1, col2, col3 = st.columns(3)
-                            col1.write(f"**Bid:** ${vehicle.current_bid_usd or 0:,.0f}")
-                            col2.write(f"**Source:** {vehicle.source}")
-                            if deal:
-                                col3.write(f"**Score:** {deal.score:.0f} | **Margem:** {deal.margin_pct:.1f}%")
-
-                            history = get_price_history(vehicle.id)
-                            if history:
-                                hist_df = pd.DataFrame(history)
-                                st.line_chart(hist_df.set_index("timestamp")["price"])
-
-                            st.markdown(f"[Abrir listing]({vehicle.url})")
-                    else:
-                        st.write("Veiculo ainda nao encontrado no banco de dados.")
-
-                    st.caption(f"Adicionado: {item.created_at.strftime('%d/%m/%Y %H:%M')}")
-    finally:
-        session.close()
 
 # =============================================================================
 # CALCULADORA ROI
