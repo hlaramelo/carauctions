@@ -333,10 +333,13 @@ def run_alerts():
                     )
                 ).scalar_one_or_none()
                 if not already_telegrammed:
-                    telegram.send_deal_alert(deal, vehicle)
+                    try:
+                        telegram.send_deal_alert(deal, vehicle)
+                    except Exception as e:
+                        logger.error(f"[Alerts] Telegram send failed: {e}")
 
             # Email instant alerts for high-score deals
-            if deal.score >= email_min_score:
+            if deal.score >= email_min_score and email.is_configured:
                 already_emailed = session.execute(
                     select(AlertLog).where(
                         AlertLog.deal_id == deal.id,
@@ -344,43 +347,49 @@ def run_alerts():
                     )
                 ).scalar_one_or_none()
                 if not already_emailed:
-                    email.send_deal_alert(deal, vehicle)
+                    try:
+                        email.send_deal_alert(deal, vehicle)
+                    except Exception as e:
+                        logger.error(f"[Alerts] Email send failed: {e}")
 
-        # Sync all active deals to Google Sheets
-        all_active_deals = session.execute(
-            select(Deal).where(Deal.is_active == True).order_by(Deal.score.desc())  # noqa: E712
-        ).scalars().all()
+        # Sync all active deals to Google Sheets (skip if not configured)
+        try:
+            all_active_deals = session.execute(
+                select(Deal).where(Deal.is_active == True).order_by(Deal.score.desc())  # noqa: E712
+            ).scalars().all()
 
-        all_deals_with_vehicles = []
-        for deal in all_active_deals:
-            vehicle = session.get(Vehicle, deal.vehicle_id)
-            if vehicle:
-                all_deals_with_vehicles.append((deal, vehicle))
+            all_deals_with_vehicles = []
+            for deal in all_active_deals:
+                vehicle = session.get(Vehicle, deal.vehicle_id)
+                if vehicle:
+                    all_deals_with_vehicles.append((deal, vehicle))
 
-        sheets.sync_deals(all_deals_with_vehicles)
+            sheets.sync_deals(all_deals_with_vehicles)
 
-        # Sync watchlist to sheets
-        watchlist_items = session.execute(
-            select(WatchlistItem).where(WatchlistItem.is_active == True)  # noqa: E712
-        ).scalars().all()
+            # Sync watchlist to sheets
+            watchlist_items = session.execute(
+                select(WatchlistItem).where(WatchlistItem.is_active == True)  # noqa: E712
+            ).scalars().all()
 
-        watchlist_data = []
-        for item in watchlist_items:
-            vehicle = session.get(Vehicle, item.vehicle_id) if item.vehicle_id else None
-            deal = None
-            if item.vehicle_id:
-                deal = session.execute(
-                    select(Deal).where(
-                        Deal.vehicle_id == item.vehicle_id,
-                        Deal.is_active == True,  # noqa: E712
-                    )
-                ).scalar_one_or_none()
-            watchlist_data.append((item, vehicle, deal))
+            watchlist_data = []
+            for item in watchlist_items:
+                vehicle = session.get(Vehicle, item.vehicle_id) if item.vehicle_id else None
+                deal = None
+                if item.vehicle_id:
+                    deal = session.execute(
+                        select(Deal).where(
+                            Deal.vehicle_id == item.vehicle_id,
+                            Deal.is_active == True,  # noqa: E712
+                        )
+                    ).scalar_one_or_none()
+                watchlist_data.append((item, vehicle, deal))
 
-        sheets.sync_watchlist(watchlist_data)
+            sheets.sync_watchlist(watchlist_data)
 
-        # Append to history sheet (daily snapshot)
-        sheets.append_history(all_deals_with_vehicles)
+            # Append to history sheet (daily snapshot)
+            sheets.append_history(all_deals_with_vehicles)
+        except Exception as e:
+            logger.error(f"[Alerts] Google Sheets sync failed (non-fatal): {e}")
 
         logger.info(f"Alerts complete: {len(deals_with_vehicles)} high-score deals")
     except Exception as e:
