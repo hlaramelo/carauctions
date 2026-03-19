@@ -4,7 +4,6 @@ Replaces PC Car Market (which has limited inventory). Cars & Bids is a
 more active platform for the target segment of luxury/enthusiast cars.
 """
 
-import json
 import re
 from datetime import datetime, timezone
 
@@ -101,13 +100,6 @@ class CarsAndBidsScraper(BaseScraper):
         if vin_match:
             vin = vin_match.group(1)
 
-        # Images
-        images = []
-        for img in soup.select(".gallery img, .carousel img, .auction-image img"):
-            src = img.get("src", "") or img.get("data-src", "")
-            if src:
-                images.append(src)
-
         return Vehicle(
             source=self.SOURCE_NAME,
             source_id=f"cab_{auction_id}",
@@ -120,7 +112,6 @@ class CarsAndBidsScraper(BaseScraper):
             reserve_met=reserve_met,
             mileage=mileage,
             title_status=title_status,
-            image_urls=json.dumps(images[:10]) if images else None,
             auction_end=auction_end,
         )
 
@@ -229,12 +220,6 @@ class CarsAndBidsScraper(BaseScraper):
             elif "reserve not met" in text:
                 reserve_met = False
 
-            # Image
-            img = card.find("img")
-            image_url = ""
-            if img:
-                image_url = img.get("src", "") or img.get("data-src", "")
-
             # Mileage from card text
             mileage = None
             mile_match = re.search(r"([\d,]+)\s*(?:miles?|mi)", text)
@@ -256,7 +241,6 @@ class CarsAndBidsScraper(BaseScraper):
                 reserve_met=reserve_met,
                 mileage=mileage,
                 title_status="clean",  # C&B typically lists clean-title
-                image_urls=json.dumps([image_url]) if image_url else None,
                 auction_end=auction_end,
             )
         except Exception as e:

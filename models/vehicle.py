@@ -30,7 +30,6 @@ class Vehicle(Base):
     location_state: Mapped[str | None] = mapped_column(String(2), nullable=True)
     location_city: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
-    image_urls: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON list
     engine_cc: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     auction_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

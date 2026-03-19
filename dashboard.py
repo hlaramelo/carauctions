@@ -22,6 +22,13 @@ from notifications.telegram_commands import TelegramCommandHandler
 
 init_db()
 
+# Start Telegram bot polling (once per Streamlit session)
+if "telegram_bot_started" not in st.session_state:
+    _bot = TelegramCommandHandler()
+    if _bot.is_configured:
+        _bot.start_polling()
+    st.session_state["telegram_bot_started"] = True
+
 # =============================================================================
 # STYLING
 # =============================================================================
@@ -164,9 +171,13 @@ def get_stats():
         br_listings = session.execute(
             select(func.count(BRMarketListing.id)).where(BRMarketListing.is_active == True)  # noqa: E712
         ).scalar() or 0
-        watchlist_items = session.execute(
-            select(func.count(WatchlistItem.id)).where(WatchlistItem.is_active == True)  # noqa: E712
-        ).scalar() or 0
+        try:
+            watchlist_items = session.execute(
+                select(func.count(WatchlistItem.id)).where(WatchlistItem.is_active == True)  # noqa: E712
+            ).scalar() or 0
+        except Exception:
+            session.rollback()
+            watchlist_items = 0
 
         avg_score = session.execute(
             select(func.avg(Deal.score)).where(Deal.is_active == True)  # noqa: E712
@@ -401,8 +412,6 @@ def force_fetch_auction(auction):
                 existing_v.engine_cc = vehicle.engine_cc
             if vehicle.trim:
                 existing_v.trim = vehicle.trim
-            if vehicle.image_urls:
-                existing_v.image_urls = vehicle.image_urls
             existing_v.is_active = True
             vehicle = existing_v
         else:
@@ -815,28 +824,8 @@ elif page == "Monitorados":
                         car_label += f" {vehicle.trim}"
                     label = f"[{a.source.upper()}] {car_label} — ${vehicle.current_bid_usd or 0:,.0f}"
                     with st.expander(label):
-                        # --- Top row: photo + key metrics ---
-                        img_col, info_col = st.columns([1, 2])
-
-                        with img_col:
-                            # Show vehicle photo if available
-                            images = []
-                            if vehicle.image_urls:
-                                try:
-                                    images = json.loads(vehicle.image_urls) if isinstance(vehicle.image_urls, str) else vehicle.image_urls
-                                except (json.JSONDecodeError, TypeError):
-                                    pass
-                            if images and len(images) > 0:
-                                st.image(images[0], use_container_width=True)
-                            else:
-                                st.markdown(
-                                    f'<div style="background:#1a1a2e;border-radius:8px;padding:40px;text-align:center;color:#555">'
-                                    f'<br>Sem foto<br><br></div>',
-                                    unsafe_allow_html=True,
-                                )
-
-                        with info_col:
-                            analysis = monitor_engine.analyze(vehicle)
+                        # --- Key metrics ---
+                        analysis = monitor_engine.analyze(vehicle)
                             has_end = vehicle.auction_end is not None
                             tempo = MonitorEngine.format_time_remaining(
                                 analysis.get("tempo_restante_s"), has_auction_end=has_end
@@ -936,14 +925,6 @@ elif page == "Monitorados":
                             if vehicle.engine_cc:
                                 st.write(f"**Motor:** {vehicle.engine_cc/1000:.1f}L ({vehicle.engine_cc}cc)")
 
-                        # --- Photo gallery ---
-                        if images and len(images) > 1:
-                            with st.expander(f"Galeria de fotos ({len(images)})"):
-                                gallery_cols = st.columns(min(4, len(images) - 1))
-                                for idx, img_url in enumerate(images[1:5]):  # Show up to 4 more
-                                    with gallery_cols[idx % len(gallery_cols)]:
-                                        st.image(img_url, use_container_width=True)
-
                         # --- Price history ---
                         st.divider()
                         history = get_price_history(vehicle.id)
@@ -1010,9 +991,14 @@ elif page == "Monitorados":
         st.divider()
         section("Watchlist (via Telegram)")
 
-        watch_items = session.execute(
-            select(WatchlistItem).where(WatchlistItem.is_active == True)  # noqa: E712
-        ).scalars().all()
+        try:
+            watch_items = session.execute(
+                select(WatchlistItem).where(WatchlistItem.is_active == True)  # noqa: E712
+            ).scalars().all()
+        except Exception:
+            session.rollback()
+            watch_items = []
+            st.warning("Tabela watchlist ainda nao disponivel. Execute o pipeline para criar.")
 
         if not watch_items:
             st.caption("Nenhum item na watchlist. Adicione via Telegram com /watch.")

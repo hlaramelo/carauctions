@@ -1,6 +1,5 @@
 """Bring a Trailer scraper - extracts active auction listings."""
 
-import json
 import re
 from datetime import datetime, timezone
 
@@ -98,10 +97,6 @@ class BringATrailerScraper(BaseScraper):
         # Extract current bid if visible
         bid = self._extract_bid(element)
 
-        # Extract image
-        img = element.find("img")
-        image_url = img.get("src", "") if img else ""
-
         vehicle = Vehicle(
             source=self.SOURCE_NAME,
             source_id=source_id,
@@ -110,7 +105,6 @@ class BringATrailerScraper(BaseScraper):
             model=model,
             year=year or 0,
             current_bid_usd=bid,
-            image_urls=json.dumps([image_url]) if image_url else None,
         )
 
         return vehicle
@@ -174,13 +168,6 @@ class BringATrailerScraper(BaseScraper):
                 except (ValueError, TypeError):
                     pass
 
-        # Images
-        images = []
-        for img in soup.select(".gallery img, .carousel img, .listing-image img"):
-            src = img.get("src", "") or img.get("data-src", "")
-            if src and "thumb" not in src.lower():
-                images.append(src)
-
         # Title status
         title_status = "clean"  # BaT typically lists clean-title vehicles
         for item in essentials:
@@ -203,7 +190,6 @@ class BringATrailerScraper(BaseScraper):
             title_status=title_status,
             location_state=location_state,
             location_city=location_city,
-            image_urls=json.dumps(images[:10]) if images else None,
             auction_end=auction_end,
         )
 

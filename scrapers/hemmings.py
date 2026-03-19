@@ -1,6 +1,5 @@
 """Hemmings scraper - classic and collector car listings."""
 
-import json
 import re
 from datetime import datetime, timezone
 
@@ -90,13 +89,6 @@ class HemmingsScraper(BaseScraper):
         if vin_match:
             vin = vin_match.group(1)
 
-        # Images
-        images = []
-        for img in soup.select(".gallery img, .carousel img, .listing-image img"):
-            src = img.get("src", "") or img.get("data-src", "")
-            if src:
-                images.append(src)
-
         return Vehicle(
             source=self.SOURCE_NAME,
             source_id=f"hem_{listing_id}",
@@ -110,7 +102,6 @@ class HemmingsScraper(BaseScraper):
             title_status=title_status,
             location_state=location_state,
             location_city=location_city,
-            image_urls=json.dumps(images[:10]) if images else None,
         )
 
     def scrape_listings(self) -> list[Vehicle]:
@@ -238,12 +229,6 @@ class HemmingsScraper(BaseScraper):
                     location_state = state_match.group(1)
                     location_city = loc_text.split(",")[0].strip()
 
-            # Image
-            img = card.find("img")
-            image_url = ""
-            if img:
-                image_url = img.get("src", "") or img.get("data-src", "")
-
             return Vehicle(
                 source=self.SOURCE_NAME,
                 source_id=f"hem_{listing_id}",
@@ -256,7 +241,6 @@ class HemmingsScraper(BaseScraper):
                 title_status="clean",  # Hemmings typically lists clean-title vehicles
                 location_state=location_state,
                 location_city=location_city,
-                image_urls=json.dumps([image_url]) if image_url else None,
             )
         except Exception as e:
             logger.debug(f"[Hemmings] Failed to parse card: {e}")

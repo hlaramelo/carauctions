@@ -307,21 +307,6 @@ class CopartScraper(BaseScraper):
                         from datetime import timedelta
                         auction_end = datetime.now(timezone.utc) + timedelta(days=days, hours=hours, minutes=mins)
 
-            # Images - grab from page and Copart CDN
-            image_list = []
-            # Try page images first
-            for img in soup.find_all("img"):
-                src = img.get("src", "") or img.get("data-src", "")
-                if src and ("cs.copart.com" in src or "cdnimg" in src) and "lot" in src.lower():
-                    if src not in image_list:
-                        image_list.append(src)
-            # Fallback: Copart CDN pattern
-            if not image_list:
-                for i in range(1, 6):
-                    image_list.append(
-                        f"https://cs.copart.com/v1/AUTH_svc.pdoc00001/{lot_number}/{i}.jpg"
-                    )
-
             # Fallback: get URL-based data for anything missing
             url_vehicle = self._parse_from_url(url, lot_number)
 
@@ -335,7 +320,7 @@ class CopartScraper(BaseScraper):
 
             logger.debug(
                 f"[Copart/Selenium] Extracted: bid={current_bid}, mi={mileage}, "
-                f"damage={damage}, loc={location_state}, vin={vin}, images={len(image_list)}"
+                f"damage={damage}, loc={location_state}, vin={vin}"
             )
 
             return Vehicle(
@@ -355,7 +340,6 @@ class CopartScraper(BaseScraper):
                 location_city=location_city,
                 engine_cc=engine_cc,
                 auction_end=auction_end,
-                image_urls=json.dumps(image_list) if image_list else None,
             )
         except Exception as e:
             logger.error(f"[Copart] Selenium error: {e}")
@@ -707,11 +691,6 @@ class CopartScraper(BaseScraper):
                 except (ValueError, TypeError, OSError):
                     pass
 
-            # Images
-            image_url = item.get("imageUrl") or item.get("tims") or ""
-            if not image_url or "http" not in str(image_url):
-                image_url = f"https://cs.copart.com/v1/AUTH_svc.pdoc00001/{lot_number}/1.jpg"
-
             # Engine
             engine_str = item.get("egn") or item.get("engineSize") or item.get("engineType") or ""
             engine_cc = self._parse_engine_cc(engine_str)
@@ -740,7 +719,6 @@ class CopartScraper(BaseScraper):
                 damage_description=damage_desc or None,
                 location_state=location_state,
                 location_city=location_city,
-                image_urls=f'["{image_url}"]' if image_url else None,
                 engine_cc=engine_cc,
                 auction_end=auction_end,
             )
