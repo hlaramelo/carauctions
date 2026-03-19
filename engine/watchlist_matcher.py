@@ -122,6 +122,11 @@ def _vehicle_matches_watch(vehicle: Vehicle, watch: WatchlistItem) -> bool:
         if not vehicle.year or vehicle.year != watch.year:
             return False
 
+    # Max price filter
+    if watch.max_price_usd is not None:
+        if vehicle.current_bid_usd and vehicle.current_bid_usd > watch.max_price_usd:
+            return False
+
     # Keyword match — all keywords must be found in model+trim+title
     if watch.keywords:
         kw_list = [k.strip() for k in watch.keywords.split(",") if k.strip()]
@@ -173,6 +178,13 @@ def find_matching_vehicles(watch: WatchlistItem, only_new: bool = True) -> list[
             )
         elif watch.year is not None:
             query = query.where(Vehicle.year == watch.year)
+
+        # Pre-filter by max price if specified
+        if watch.max_price_usd is not None:
+            query = query.where(
+                (Vehicle.current_bid_usd == None) |  # noqa: E711 - include vehicles without a bid yet
+                (Vehicle.current_bid_usd <= watch.max_price_usd)
+            )
 
         # Pre-filter by VIN if specified
         if watch.vin:

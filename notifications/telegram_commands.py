@@ -190,16 +190,19 @@ class TelegramCommandHandler:
 
     # Year range pattern: "1993-1997" or "1993 1997"
     _YEAR_RANGE_RE = re.compile(r"(\d{4})\s*[-–]\s*(\d{4})")
+    # Max price pattern: "max:30000" or "max:30k"
+    _MAX_PRICE_RE = re.compile(r"max[:\s]?\$?(\d+\.?\d*)\s*k?", re.IGNORECASE)
 
     def _cmd_watch(self, chat_id: str, args: str):
         """Add a vehicle to the watchlist.
 
         Formats:
-          /watch WVWZZZ3CZWE123456              - by VIN
-          /watch Porsche 911 2022               - by make/model/year
-          /watch Porsche 911 1993-1997           - by make/model/year range
-          /watch Porsche 911 1993-1997 993 Turbo - with keywords
-          /watch BMW M5 1988-1992 E34            - with generation keyword
+          /watch WVWZZZ3CZWE123456                        - by VIN
+          /watch Porsche 911 2022                         - by make/model/year
+          /watch Porsche 911 1993-1997                     - by make/model/year range
+          /watch Porsche 911 1993-1997 993 Turbo           - with keywords
+          /watch BMW M5 1988-1992 E34                      - with generation keyword
+          /watch Porsche 911 1993-1997 993 max:30000       - with max price
         """
         if not args:
             self._send(chat_id, (
@@ -208,12 +211,29 @@ class TelegramCommandHandler:
                 "`/watch Porsche 911 2022` - por marca/modelo/ano\n"
                 "`/watch Porsche 911 1993-1997` - range de anos\n"
                 "`/watch Porsche 911 1993-1997 993 Turbo` - com keywords\n"
-                "`/watch BMW M5 1985-1992 E28 E34` - com geracao"
+                "`/watch BMW M5 1985-1992 E28 E34` - com geracao\n"
+                "`/watch Porsche 911 1993-1997 993 max:30000` - com preco max"
             ))
             return
 
         session = get_session()
         try:
+            # Extract max price if present (remove from args before parsing)
+            max_price = None
+            price_match = self._MAX_PRICE_RE.search(args)
+            if price_match:
+                price_val = float(price_match.group(1))
+                # Handle "30k" shorthand
+                if args[price_match.end() - 1:price_match.end()].lower() == "k":
+                    price_val *= 1000
+                elif price_val < 1000:
+                    # If user typed "max:30" they probably mean 30k
+                    price_val *= 1000
+                max_price = price_val
+                # Remove the max:XXX from args
+                args = args[:price_match.start()].strip() + " " + args[price_match.end():].strip()
+                args = args.strip()
+
             # Check if it looks like a VIN (17 alphanumeric chars)
             cleaned = args.strip().upper()
             if len(cleaned) == 17 and cleaned.isalnum():
@@ -241,23 +261,25 @@ class TelegramCommandHandler:
                     make=vehicle.make if vehicle else None,
                     model=vehicle.model if vehicle else None,
                     year=vehicle.year if vehicle else None,
+                    max_price_usd=max_price,
                     chat_id=chat_id,
                 )
                 session.add(item)
                 session.commit()
 
+                price_str = f"\nPreco max: ${max_price:,.0f}" if max_price else ""
                 if vehicle:
                     self._send(chat_id,
                         f"Adicionado a watchlist: *{vehicle.year} {vehicle.make} {vehicle.model}*\n"
-                        f"VIN: `{cleaned}`"
+                        f"VIN: `{cleaned}`{price_str}"
                     )
                 else:
                     self._send(chat_id,
                         f"VIN `{cleaned}` adicionado a watchlist.\n"
-                        "Veiculo nao encontrado no banco ainda — sera monitorado quando aparecer."
+                        f"Veiculo nao encontrado no banco ainda — sera monitorado quando aparecer.{price_str}"
                     )
             else:
-                # Watch by make/model with optional year range and keywords
+                # Watch by make/model with optional year range, keywords, and max price
                 parts = args.strip().split()
                 if len(parts) < 2:
                     self._send(chat_id, "Formato: `/watch Make Model Ano` (ex: `/watch Porsche 911 2022`)")
@@ -287,10 +309,8 @@ class TelegramCommandHandler:
                     tokens = remaining.split()
                     if tokens[-1].isdigit() and len(tokens[-1]) == 4:
                         year = int(tokens.pop())
-                        # Check if there are keywords after model
                         model = " ".join(tokens) if tokens else ""
                     else:
-                        # No year found — check if last tokens are keywords
                         model = remaining
                         year = None
 
@@ -301,6 +321,7 @@ class TelegramCommandHandler:
                     year_min=year_min,
                     year_max=year_max,
                     keywords=keywords,
+                    max_price_usd=max_price,
                     chat_id=chat_id,
                 )
                 session.add(item)
@@ -314,8 +335,9 @@ class TelegramCommandHandler:
                     year_str = f" {year}"
 
                 kw_str = f"\nKeywords: _{keywords}_" if keywords else ""
+                price_str = f"\nPreco max: _${max_price:,.0f}_" if max_price else ""
                 self._send(chat_id,
-                    f"Adicionado a watchlist: *{make} {model}{year_str}*{kw_str}\n"
+                    f"Adicionado a watchlist: *{make} {model}{year_str}*{kw_str}{price_str}\n"
                     f"Voce sera notificado quando aparecerem leiloes correspondentes."
                 )
 
@@ -396,6 +418,8 @@ class TelegramCommandHandler:
                     spec = f"{year_part} {item.make} {item.model or ''}".strip()
                     if item.keywords:
                         spec += f" [{item.keywords}]"
+                    if item.max_price_usd:
+                        spec += f" max:${item.max_price_usd:,.0f}"
                     label = f"{spec} ({label})" if label else spec
 
                 # Check for active deals

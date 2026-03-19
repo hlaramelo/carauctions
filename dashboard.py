@@ -1003,9 +1003,50 @@ elif page == "Monitorados":
         # =================================================================
         # WATCHLIST (Telegram /watch) — integrado em Monitorados
         # =================================================================
+        # WATCHLIST — adicionar + listar
+        # =================================================================
         st.divider()
-        section("Watchlist (via Telegram)")
+        section("Watchlist")
 
+        # --- Add watch form ---
+        with st.form("add_watch", clear_on_submit=True):
+            st.caption("Adicionar veiculo a watchlist (tambem pode usar /watch no Telegram)")
+            wc1, wc2, wc3 = st.columns(3)
+            with wc1:
+                w_make = st.text_input("Marca", placeholder="Porsche")
+                w_model = st.text_input("Modelo", placeholder="911")
+            with wc2:
+                w_year_min = st.number_input("Ano de", value=0, min_value=0, max_value=2030, step=1)
+                w_year_max = st.number_input("Ano ate", value=0, min_value=0, max_value=2030, step=1)
+            with wc3:
+                w_keywords = st.text_input("Keywords", placeholder="993, Turbo")
+                w_max_price = st.number_input("Preco max (USD)", value=0, min_value=0, step=1000)
+            w_submitted = st.form_submit_button("Adicionar a Watchlist")
+
+        if w_submitted and w_make and w_model:
+            try:
+                new_watch = WatchlistItem(
+                    make=w_make.strip(),
+                    model=w_model.strip(),
+                    year_min=w_year_min if w_year_min > 0 else None,
+                    year_max=w_year_max if w_year_max > 0 else None,
+                    keywords=w_keywords.strip() if w_keywords.strip() else None,
+                    max_price_usd=float(w_max_price) if w_max_price > 0 else None,
+                    chat_id="dashboard",
+                )
+                session.add(new_watch)
+                session.commit()
+                year_str = ""
+                if w_year_min > 0 and w_year_max > 0:
+                    year_str = f" ({w_year_min}-{w_year_max})"
+                price_str = f" | Max ${w_max_price:,.0f}" if w_max_price > 0 else ""
+                st.success(f"Adicionado: {w_make} {w_model}{year_str}{price_str}")
+                st.rerun()
+            except Exception as e:
+                session.rollback()
+                st.error(f"Erro: {e}")
+
+        # --- List watchlist items ---
         try:
             watch_items = session.execute(
                 select(WatchlistItem).where(WatchlistItem.is_active == True)  # noqa: E712
@@ -1016,12 +1057,29 @@ elif page == "Monitorados":
             st.warning("Tabela watchlist ainda nao disponivel. Execute o pipeline para criar.")
 
         if not watch_items:
-            st.caption("Nenhum item na watchlist. Adicione via Telegram com /watch.")
+            st.caption("Nenhum item na watchlist.")
         else:
             for item in watch_items:
-                label = item.vin or f"{item.year or ''} {item.make or ''} {item.model or ''}".strip()
+                # Build label
+                label_parts = []
+                if item.year_min and item.year_max:
+                    label_parts.append(f"{item.year_min}-{item.year_max}")
+                elif item.year:
+                    label_parts.append(str(item.year))
+                label_parts.append(item.make or "")
+                label_parts.append(item.model or "")
+                if item.vin:
+                    label_parts.append(f"VIN:{item.vin}")
+                label = " ".join(p for p in label_parts if p).strip()
+                extras = []
+                if item.keywords:
+                    extras.append(f"kw: {item.keywords}")
+                if item.max_price_usd:
+                    extras.append(f"max: ${item.max_price_usd:,.0f}")
+                if extras:
+                    label += f" [{', '.join(extras)}]"
 
-                with st.expander(f"[WATCH] #{item.id} — {label}"):
+                with st.expander(f"#{item.id} — {label}"):
                     if item.vehicle_id:
                         vehicle = session.get(Vehicle, item.vehicle_id)
                         if vehicle:
@@ -1049,7 +1107,19 @@ elif page == "Monitorados":
 
                     if item.notes:
                         st.caption(f"Notas: {item.notes}")
-                    st.caption(f"Adicionado: {item.created_at.strftime('%d/%m/%Y %H:%M')}")
+                    col_info, col_remove = st.columns([3, 1])
+                    with col_info:
+                        st.caption(f"Adicionado: {item.created_at.strftime('%d/%m/%Y %H:%M')}")
+                    with col_remove:
+                        if st.button("Remover", key=f"rmwatch_{item.id}", type="secondary"):
+                            try:
+                                db_item = session.get(WatchlistItem, item.id)
+                                if db_item:
+                                    db_item.is_active = False
+                                    session.commit()
+                                st.rerun()
+                            except Exception:
+                                session.rollback()
 
     finally:
         session.close()

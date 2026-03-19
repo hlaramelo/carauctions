@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import String, Integer, DateTime, Text, Boolean
+from sqlalchemy import String, Integer, Float, DateTime, Text, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 
 from models.database import Base
@@ -16,6 +16,7 @@ class WatchlistItem(Base):
     - By make/model with year range (e.g., Porsche 911 1993-1997)
     - With keywords that match against model, trim, or listing title
       (e.g., "993 Turbo" to find Porsche 911 993 Turbo listings)
+    - With max price filter (e.g., max:30000 to only match bids under $30k)
     """
 
     __tablename__ = "watchlist"
@@ -29,6 +30,7 @@ class WatchlistItem(Base):
     year_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
     year_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
     keywords: Mapped[str | None] = mapped_column(String(500), nullable=True)  # comma-separated
+    max_price_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     chat_id: Mapped[str] = mapped_column(String(50), index=True)  # Telegram chat ID
