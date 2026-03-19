@@ -30,6 +30,7 @@ from scheduler import (
     run_price_history_recording,
     run_alerts,
     run_full_pipeline,
+    run_watchlist_matching,
 )
 
 # Load environment variables from .env file
@@ -109,6 +110,7 @@ def run_scheduled():
     )
     sched.add_job(run_alerts, "interval", minutes=30, id="alerts")
     sched.add_job(run_monitored_auctions, "interval", minutes=5, id="monitored_auctions")
+    sched.add_job(run_watchlist_matching, "interval", minutes=15, id="watchlist_matching")
     sched.add_job(run_daily_digest, "cron", hour=8, minute=0, id="daily_digest")
 
     logger.info("Scheduler started. Press Ctrl+C to exit.")
@@ -121,6 +123,7 @@ def run_scheduled():
     logger.info(f"  Deal scoring: every {bat_interval} min")
     logger.info("  Alerts: every 30 min")
     logger.info("  Monitored auctions: every 5 min")
+    logger.info("  Watchlist matching: every 15 min")
     logger.info("  Daily digest email: 08:00")
 
     # Start Telegram command bot (background polling)

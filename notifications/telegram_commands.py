@@ -139,7 +139,9 @@ class TelegramCommandHandler:
             "/deals - Top 10 deals do momento\n"
             "/watch `VIN` - Acompanhar veiculo por VIN\n"
             "/watch `Make Model Year` - Acompanhar por spec\n"
-            "/unwatch `VIN` - Parar de acompanhar\n"
+            "/watch `Make Model 1993-1997` - Range de anos\n"
+            "/watch `Make Model 1993-1997 keywords` - Com keywords\n"
+            "/unwatch `VIN ou ID` - Parar de acompanhar\n"
             "/watchlist - Ver veiculos acompanhados\n\n"
             "*Monitoramento:*\n"
             "/monitor `URL` - Monitorar leilao especifico\n"
@@ -186,13 +188,27 @@ class TelegramCommandHandler:
         finally:
             session.close()
 
+    # Year range pattern: "1993-1997" or "1993 1997"
+    _YEAR_RANGE_RE = re.compile(r"(\d{4})\s*[-–]\s*(\d{4})")
+
     def _cmd_watch(self, chat_id: str, args: str):
-        """Add a vehicle to the watchlist."""
+        """Add a vehicle to the watchlist.
+
+        Formats:
+          /watch WVWZZZ3CZWE123456              - by VIN
+          /watch Porsche 911 2022               - by make/model/year
+          /watch Porsche 911 1993-1997           - by make/model/year range
+          /watch Porsche 911 1993-1997 993 Turbo - with keywords
+          /watch BMW M5 1988-1992 E34            - with generation keyword
+        """
         if not args:
             self._send(chat_id, (
                 "Uso:\n"
                 "`/watch WVWZZZ3CZWE123456` - por VIN\n"
-                "`/watch Porsche 911 2022` - por marca/modelo/ano"
+                "`/watch Porsche 911 2022` - por marca/modelo/ano\n"
+                "`/watch Porsche 911 1993-1997` - range de anos\n"
+                "`/watch Porsche 911 1993-1997 993 Turbo` - com keywords\n"
+                "`/watch BMW M5 1985-1992 E28 E34` - com geracao"
             ))
             return
 
@@ -241,31 +257,67 @@ class TelegramCommandHandler:
                         "Veiculo nao encontrado no banco ainda — sera monitorado quando aparecer."
                     )
             else:
-                # Watch by make/model/year
+                # Watch by make/model with optional year range and keywords
                 parts = args.strip().split()
                 if len(parts) < 2:
-                    self._send(chat_id, "Formato: `/watch Make Model Year` (ex: `/watch Porsche 911 2022`)")
+                    self._send(chat_id, "Formato: `/watch Make Model Ano` (ex: `/watch Porsche 911 2022`)")
                     return
 
-                # Try to extract year (last token if numeric)
-                year = None
-                if parts[-1].isdigit() and len(parts[-1]) == 4:
-                    year = int(parts.pop())
-
                 make = parts[0]
-                model = " ".join(parts[1:]) if len(parts) > 1 else ""
+                remaining = " ".join(parts[1:])
+
+                # Check for year range (e.g., "1993-1997")
+                year = None
+                year_min = None
+                year_max = None
+                keywords = None
+                range_match = self._YEAR_RANGE_RE.search(remaining)
+
+                if range_match:
+                    year_min = int(range_match.group(1))
+                    year_max = int(range_match.group(2))
+                    # Everything before the range is model, everything after is keywords
+                    before_range = remaining[:range_match.start()].strip()
+                    after_range = remaining[range_match.end():].strip()
+                    model = before_range
+                    if after_range:
+                        keywords = after_range
+                else:
+                    # Try single year at end
+                    tokens = remaining.split()
+                    if tokens[-1].isdigit() and len(tokens[-1]) == 4:
+                        year = int(tokens.pop())
+                        # Check if there are keywords after model
+                        model = " ".join(tokens) if tokens else ""
+                    else:
+                        # No year found — check if last tokens are keywords
+                        model = remaining
+                        year = None
 
                 item = WatchlistItem(
                     make=make,
                     model=model,
                     year=year,
+                    year_min=year_min,
+                    year_max=year_max,
+                    keywords=keywords,
                     chat_id=chat_id,
                 )
                 session.add(item)
                 session.commit()
 
-                year_str = f" {year}" if year else ""
-                self._send(chat_id, f"Adicionado a watchlist: *{make} {model}{year_str}*")
+                # Build confirmation message
+                year_str = ""
+                if year_min and year_max:
+                    year_str = f" ({year_min}-{year_max})"
+                elif year:
+                    year_str = f" {year}"
+
+                kw_str = f"\nKeywords: _{keywords}_" if keywords else ""
+                self._send(chat_id,
+                    f"Adicionado a watchlist: *{make} {model}{year_str}*{kw_str}\n"
+                    f"Voce sera notificado quando aparecerem leiloes correspondentes."
+                )
 
         except Exception as e:
             logger.error(f"Error in /watch: {e}")
@@ -335,7 +387,15 @@ class TelegramCommandHandler:
                 if item.vin:
                     label = f"VIN: `{item.vin}`"
                 if item.make:
-                    spec = f"{item.year or ''} {item.make} {item.model or ''}".strip()
+                    if item.year_min and item.year_max:
+                        year_part = f"{item.year_min}-{item.year_max}"
+                    elif item.year:
+                        year_part = str(item.year)
+                    else:
+                        year_part = ""
+                    spec = f"{year_part} {item.make} {item.model or ''}".strip()
+                    if item.keywords:
+                        spec += f" [{item.keywords}]"
                     label = f"{spec} ({label})" if label else spec
 
                 # Check for active deals

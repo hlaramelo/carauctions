@@ -416,6 +416,42 @@ def run_daily_digest():
         session.close()
 
 
+def run_watchlist_matching():
+    """Match active watchlist items against new vehicles and send alerts."""
+    logger.info("=== Starting watchlist matching job ===")
+    from engine.watchlist_matcher import match_all_watchlists
+
+    telegram = TelegramNotifier()
+    session = get_session()
+
+    try:
+        matches = match_all_watchlists()
+
+        if not matches:
+            logger.info("[Watchlist] No new matches found")
+            return
+
+        total_notified = 0
+        for watch, vehicles in matches:
+            # Send Telegram alert
+            telegram.send_watchlist_alert(watch, vehicles)
+
+            # Mark vehicles as notified for this watch
+            db_watch = session.get(WatchlistItem, watch.id)
+            if db_watch:
+                for v in vehicles:
+                    db_watch.add_notified_id(v.id)
+                total_notified += len(vehicles)
+
+        session.commit()
+        logger.info(f"[Watchlist] Sent {len(matches)} alerts for {total_notified} vehicle matches")
+    except Exception as e:
+        logger.error(f"Error in watchlist matching: {e}")
+        session.rollback()
+    finally:
+        session.close()
+
+
 SCRAPER_MAP = {
     "copart": CopartScraper,
     "bat": BringATrailerScraper,
@@ -626,6 +662,9 @@ def run_full_pipeline():
 
     # Monitor individual listings
     run_monitored_auctions()
+
+    # Match watchlist items
+    run_watchlist_matching()
 
     logger.info("========================================")
     logger.info("Pipeline run complete")

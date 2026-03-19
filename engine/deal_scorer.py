@@ -182,16 +182,18 @@ class DealScorer:
         """Score vehicle condition based on mileage, title status, damage."""
         score = 70.0  # Base score
 
-        # Mileage factor
+        # Mileage factor — adjusted for classic/vintage cars
+        # Cars older than 30 years get softer mileage penalties
+        is_classic = vehicle.year and vehicle.year < 1995
         if vehicle.mileage is not None:
             if vehicle.mileage < 10000:
                 score += 20
             elif vehicle.mileage < 30000:
                 score += 10
             elif vehicle.mileage > 80000:
-                score -= 20
+                score -= 10 if is_classic else 20
             elif vehicle.mileage > 50000:
-                score -= 10
+                score -= 5 if is_classic else 10
 
         # Title status
         if vehicle.title_status:

@@ -1,11 +1,11 @@
 # Car Auction Deal Finder - Settings
 
 filters:
-  min_year: 2018
-  max_mileage: 50000
+  min_year: 1950
+  max_mileage: 999999
   title_status: ["clean", "rebuilt"]
   min_margin_pct: 15
-  max_auction_price_usd: 200000
+  max_auction_price_usd: 500000
   makes:
     - Porsche
     - BMW
@@ -17,6 +17,11 @@ filters:
     - Aston Martin
     - Bentley
     - Maserati
+    - Rolls-Royce
+    - Jaguar
+    - Alfa Romeo
+    - De Tomaso
+    - Lotus
   exclude_states: ["HI", "AK"]
 
 scoring:

@@ -155,6 +155,54 @@ class TelegramNotifier:
             logger.error(f"[Telegram] Failed to send message: {e}")
             return False
 
+    def send_watchlist_alert(
+        self,
+        watch: "WatchlistItem",
+        vehicles: list[Vehicle],
+    ) -> bool:
+        """Send an alert when new vehicles match a watchlist item."""
+        from models.watchlist import WatchlistItem  # noqa: F811
+
+        # Build watch label
+        if watch.year_min and watch.year_max:
+            year_str = f"{watch.year_min}-{watch.year_max}"
+        elif watch.year:
+            year_str = str(watch.year)
+        else:
+            year_str = ""
+
+        label = f"{year_str} {watch.make or ''} {watch.model or ''}".strip()
+        if watch.keywords:
+            label += f" [{watch.keywords}]"
+
+        lines = [
+            f"🔔 *WATCHLIST MATCH*",
+            f"_{label}_\n",
+            f"{len(vehicles)} novo(s) leilao(oes) encontrado(s):\n",
+        ]
+
+        for v in vehicles[:5]:  # Max 5 per message
+            bid_str = f"${v.current_bid_usd:,.0f}" if v.current_bid_usd else "N/A"
+            mileage_str = f"{v.mileage:,} mi" if v.mileage else "N/A"
+            title_str = v.title_status or "N/A"
+            lines.append(
+                f"*{v.year} {v.make} {v.model}*\n"
+                f"  💰 Bid: {bid_str} | {mileage_str} | {title_str}\n"
+                f"  [Ver]({v.url})\n"
+            )
+
+        if len(vehicles) > 5:
+            lines.append(f"_...e mais {len(vehicles) - 5} resultado(s)_")
+
+        message = "\n".join(lines)
+        target_chat = watch.chat_id
+
+        if not self.bot_token:
+            logger.info(f"[Telegram] Would send watchlist alert:\n{message}")
+            return False
+
+        return self._send_message_to(target_chat, message)
+
     @staticmethod
     def _format_deal_message(deal: Deal, vehicle: Vehicle) -> str:
         """Format a deal into a readable Telegram message."""
