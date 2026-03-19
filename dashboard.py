@@ -4,6 +4,21 @@ Run with: streamlit run dashboard.py
 """
 
 import json
+import os
+
+from dotenv import load_dotenv
+load_dotenv()
+
+# Also load Streamlit secrets into env vars (for Streamlit Cloud)
+try:
+    import streamlit as st
+    for key in ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DATABASE_URL"]:
+        if key not in os.environ or not os.environ[key]:
+            val = st.secrets.get(key, "")
+            if val:
+                os.environ[key] = val
+except Exception:
+    pass
 
 import pandas as pd
 import streamlit as st
@@ -826,31 +841,31 @@ elif page == "Monitorados":
                     with st.expander(label):
                         # --- Key metrics ---
                         analysis = monitor_engine.analyze(vehicle)
-                            has_end = vehicle.auction_end is not None
-                            tempo = MonitorEngine.format_time_remaining(
-                                analysis.get("tempo_restante_s"), has_auction_end=has_end
-                            )
+                        has_end = vehicle.auction_end is not None
+                        tempo = MonitorEngine.format_time_remaining(
+                            analysis.get("tempo_restante_s"), has_auction_end=has_end
+                        )
 
-                            # Vehicle info header
-                            st.markdown(f"### {car_label}")
-                            if vehicle.engine_cc:
-                                st.caption(f"Motor: {vehicle.engine_cc/1000:.1f}L | {vehicle.title_status or 'N/A'} title")
-                            col_btn, col_link, col_remove = st.columns([1, 2, 1])
-                            with col_btn:
-                                if st.button("Atualizar", key=f"fetch_{a.id}"):
-                                    with st.spinner("Buscando dados..."):
-                                        ok, msg = force_fetch_auction(a)
-                                    if ok:
-                                        st.success(msg)
-                                        st.rerun()
-                                    else:
-                                        st.error(msg)
-                            with col_link:
-                                st.markdown(f"[Abrir no {a.source.title()}]({vehicle.url})")
-                            with col_remove:
-                                if st.button("Remover", key=f"remove_{a.id}", type="secondary"):
-                                    _remove_auction(a.id)
+                        # Vehicle info header
+                        st.markdown(f"### {car_label}")
+                        if vehicle.engine_cc:
+                            st.caption(f"Motor: {vehicle.engine_cc/1000:.1f}L | {vehicle.title_status or 'N/A'} title")
+                        col_btn, col_link, col_remove = st.columns([1, 2, 1])
+                        with col_btn:
+                            if st.button("Atualizar", key=f"fetch_{a.id}"):
+                                with st.spinner("Buscando dados..."):
+                                    ok, msg = force_fetch_auction(a)
+                                if ok:
+                                    st.success(msg)
                                     st.rerun()
+                                else:
+                                    st.error(msg)
+                        with col_link:
+                            st.markdown(f"[Abrir no {a.source.title()}]({vehicle.url})")
+                        with col_remove:
+                            if st.button("Remover", key=f"remove_{a.id}", type="secondary"):
+                                _remove_auction(a.id)
+                                st.rerun()
 
                         # --- Auction metrics row ---
                         st.divider()

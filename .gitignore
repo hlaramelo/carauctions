@@ -10,3 +10,4 @@ dist/
 logs/
 credentials.json
 *.credentials.json
+.streamlit/secrets.toml
