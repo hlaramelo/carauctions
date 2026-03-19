@@ -466,7 +466,7 @@ with st.sidebar:
     st.markdown("### Navegacao")
     page = st.radio(
         "Selecionar pagina",
-        ["Dashboard", "Deals", "Monitorados", "Analise de Mercado", "Watchlist"],
+        ["Dashboard", "Deals", "Monitorados", "Analise de Mercado", "Watchlist", "Calculadora ROI"],
         label_visibility="collapsed",
     )
 
@@ -1136,3 +1136,326 @@ elif page == "Watchlist":
                     st.caption(f"Adicionado: {item.created_at.strftime('%d/%m/%Y %H:%M')}")
     finally:
         session.close()
+
+# =============================================================================
+# CALCULADORA ROI
+# =============================================================================
+elif page == "Calculadora ROI":
+    section("Calculadora — Importacao de carros da Copart (EUA → Brasil)")
+
+    # --- Tab selector ---
+    calc_tab = st.radio(
+        "Secao",
+        ["Parametros", "Resultado", "Detalhamento impostos"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+    # --- Session state defaults ---
+    _defaults = {
+        "calc_lance": 8000, "calc_buyerfee": 900, "calc_misc_us": 200,
+        "calc_frete_ocean": 1200, "calc_ptax": 5.80, "calc_venda": 120000,
+        "calc_cilin": "1.0-2.0L (IPI 13%)", "calc_despachante": 4000,
+        "calc_porto": 2000, "calc_frete_br": 1500, "calc_mecanica": 8000,
+        "calc_vend_cost": 2000, "calc_ir_type": "PJ Simples Nacional ~ 6%",
+    }
+    for k, v in _defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    # --- IPI rates map ---
+    _IPI_MAP = {
+        "≤ 1.0L (IPI 7%)": 0.07,
+        "1.0-2.0L (IPI 13%)": 0.13,
+        "2.0-3.0L (IPI 25%)": 0.25,
+        "> 3.0L (IPI 55%)": 0.55,
+    }
+    _IR_MAP = {
+        "PF — IRPF 27.5%": 0.275,
+        "PJ Simples Nacional ~ 6%": 0.06,
+        "PJ Lucro Presumido ~ 13.5%": 0.135,
+    }
+
+    def _fmt_brl(n):
+        return f"R$ {n:,.0f}".replace(",", ".")
+
+    def _fmt_usd(n):
+        return f"US$ {n:,.0f}".replace(",", ".")
+
+    def _pct(n):
+        return f"{n * 100:.1f}%"
+
+    # =========================
+    # PARAMETROS TAB
+    # =========================
+    if calc_tab == "Parametros":
+        col_left, col_right = st.columns(2)
+
+        with col_left:
+            # Compra no leilao
+            st.markdown('<div class="section-header">COMPRA NO LEILAO (EUA)</div>', unsafe_allow_html=True)
+            st.session_state["calc_lance"] = st.number_input(
+                "Preco no leilao (USD)", value=st.session_state["calc_lance"],
+                step=500, min_value=0, key="inp_lance",
+            )
+            st.session_state["calc_buyerfee"] = st.number_input(
+                "Taxa Copart (buyer fee)", value=st.session_state["calc_buyerfee"],
+                step=50, min_value=0, key="inp_buyerfee",
+            )
+            st.session_state["calc_misc_us"] = st.number_input(
+                "Storage / titulo / misc", value=st.session_state["calc_misc_us"],
+                step=50, min_value=0, key="inp_misc",
+            )
+            st.session_state["calc_frete_ocean"] = st.number_input(
+                "Frete EUA → porto BR (USD)", value=st.session_state["calc_frete_ocean"],
+                step=100, min_value=0, key="inp_frete_ocean",
+            )
+
+            # Cambio e referencias
+            st.markdown('<div class="section-header">CAMBIO E REFERENCIAS</div>', unsafe_allow_html=True)
+            st.session_state["calc_ptax"] = st.slider(
+                "USD/BRL (ptax)", min_value=4.50, max_value=7.00,
+                value=st.session_state["calc_ptax"], step=0.05, key="inp_ptax",
+            )
+            st.session_state["calc_venda"] = st.number_input(
+                "Preco venda BR (BRL)", value=st.session_state["calc_venda"],
+                step=5000, min_value=0, key="inp_venda",
+            )
+            st.session_state["calc_cilin"] = st.selectbox(
+                "Cilindradas do motor",
+                list(_IPI_MAP.keys()),
+                index=list(_IPI_MAP.keys()).index(st.session_state["calc_cilin"]),
+                key="inp_cilin",
+            )
+
+        with col_right:
+            # Custos nacionais
+            st.markdown('<div class="section-header">CUSTOS NACIONAIS (BRL)</div>', unsafe_allow_html=True)
+            st.session_state["calc_despachante"] = st.number_input(
+                "Despachante / agente importacao", value=st.session_state["calc_despachante"],
+                step=500, min_value=0, key="inp_desp",
+            )
+
+            # AFRMM is calculated
+            afrmm_preview = st.session_state["calc_frete_ocean"] * st.session_state["calc_ptax"] * 0.25
+            st.markdown(f"**AFRMM (25% do frete maritimo):** {_fmt_brl(afrmm_preview)}")
+
+            st.session_state["calc_porto"] = st.number_input(
+                "Armazenagem / capatazia porto", value=st.session_state["calc_porto"],
+                step=200, min_value=0, key="inp_porto",
+            )
+            st.session_state["calc_frete_br"] = st.number_input(
+                "Frete porto → destino BR", value=st.session_state["calc_frete_br"],
+                step=200, min_value=0, key="inp_frete_br",
+            )
+            st.session_state["calc_mecanica"] = st.number_input(
+                "Funilaria / latoaria / revisao", value=st.session_state["calc_mecanica"],
+                step=1000, min_value=0, key="inp_mec",
+            )
+            st.session_state["calc_vend_cost"] = st.number_input(
+                "Custo de venda (anuncio/comissao)", value=st.session_state["calc_vend_cost"],
+                step=500, min_value=0, key="inp_vend_cost",
+            )
+
+            # Estrutura societaria
+            st.markdown('<div class="section-header">ESTRUTURA SOCIETARIA (PJ OU PF?)</div>', unsafe_allow_html=True)
+            st.session_state["calc_ir_type"] = st.selectbox(
+                "Imposto sobre lucro",
+                list(_IR_MAP.keys()),
+                index=list(_IR_MAP.keys()).index(st.session_state["calc_ir_type"]),
+                key="inp_ir",
+            )
+
+    # =========================
+    # CALCULATION ENGINE (runs for all tabs)
+    # =========================
+    ptax = st.session_state["calc_ptax"]
+    lance = st.session_state["calc_lance"]
+    buyerfee = st.session_state["calc_buyerfee"]
+    misc_us = st.session_state["calc_misc_us"]
+    frete_ocean = st.session_state["calc_frete_ocean"]
+    venda = st.session_state["calc_venda"]
+    ipi_rate = _IPI_MAP[st.session_state["calc_cilin"]]
+    despachante = st.session_state["calc_despachante"]
+    porto = st.session_state["calc_porto"]
+    frete_br = st.session_state["calc_frete_br"]
+    mecanica = st.session_state["calc_mecanica"]
+    vend_cost = st.session_state["calc_vend_cost"]
+    ir_rate = _IR_MAP[st.session_state["calc_ir_type"]]
+
+    # CIF
+    total_usd_cif = lance + buyerfee + misc_us + frete_ocean
+    VA = total_usd_cif * ptax  # Valor aduaneiro
+
+    # Impostos (cascata)
+    II = VA * 0.35
+    IPI_base = VA + II
+    IPI = IPI_base * ipi_rate
+    PIS_COFINS_base = VA + II + IPI
+    PIS = PIS_COFINS_base * 0.021
+    COFINS = PIS_COFINS_base * 0.0965
+    base_pre_icms = VA + II + IPI + PIS + COFINS
+    ICMS = base_pre_icms / (1 - 0.12) * 0.12
+    total_impostos = II + IPI + PIS + COFINS + ICMS
+
+    # Outros custos
+    AFRMM = frete_ocean * ptax * 0.25
+    IOF = total_usd_cif * ptax * 0.0038
+
+    custo_total = VA + total_impostos + AFRMM + IOF + despachante + porto + frete_br + mecanica + vend_cost
+    lucro_bruto = venda - custo_total
+    IR = max(0, lucro_bruto * ir_rate)
+    lucro_liquido = lucro_bruto - IR
+    roi = lucro_liquido / custo_total if custo_total > 0 else 0
+    margem = lucro_bruto / venda if venda > 0 else 0
+
+    # =========================
+    # RESULTADO TAB
+    # =========================
+    if calc_tab == "Resultado":
+        # Top metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Custo total all-in (BRL)", _fmt_brl(custo_total))
+        m2.metric("Receita bruta (BRL)", _fmt_brl(venda))
+        if lucro_liquido >= 0:
+            m3.metric("Lucro liquido (BRL)", _fmt_brl(lucro_liquido), delta=_pct(roi))
+        else:
+            m3.metric("Lucro liquido (BRL)", _fmt_brl(lucro_liquido), delta=_pct(roi), delta_color="inverse")
+        m4.metric("ROI sobre capital", _pct(roi))
+
+        m5, m6, m7 = st.columns(3)
+        m5.metric("Impostos import. (BRL)", _fmt_brl(total_impostos))
+        pct_imp = total_impostos / custo_total if custo_total > 0 else 0
+        m6.metric("% custo = impostos", f"{_pct(pct_imp)} do custo")
+        m7.metric("Margem bruta s/ IR", _pct(margem))
+
+        # Fluxo simplificado
+        st.markdown('<div class="section-header">FLUXO SIMPLIFICADO</div>', unsafe_allow_html=True)
+
+        breakdown_rows = [
+            ("Preco leilao (USD→BRL)", VA, ""),
+            ("Buyer fee + storage (USD→BRL)", (buyerfee + misc_us) * ptax, ""),
+            ("Frete maritimo (USD→BRL)", frete_ocean * ptax, ""),
+            ("─── Subtotal CIF", VA, "subtotal"),
+            (f"II — Imposto de Importacao (35%)", II, "imp"),
+            (f"IPI ({_pct(ipi_rate)})", IPI, "imp"),
+            ("PIS (2.1%)", PIS, "imp"),
+            ("COFINS (9.65%)", COFINS, "imp"),
+            ("ICMS SP (12% por dentro)", ICMS, "imp"),
+            ("─── Total impostos importacao", total_impostos, "subtotal"),
+            ("AFRMM (25% do frete maritimo)", AFRMM, ""),
+            ("IOF cambio remessa (~0.38%)", IOF, ""),
+            ("Despachante / agente", float(despachante), ""),
+            ("Armazenagem + capatazia porto", float(porto), ""),
+            ("Frete porto → destino", float(frete_br), ""),
+            ("Funilaria / mecanica / revisao", float(mecanica), ""),
+            ("Custo de venda (anuncios, etc.)", float(vend_cost), ""),
+        ]
+
+        # Build HTML table
+        html_rows = '<tr><th style="text-align:left;padding:6px 8px;font-weight:500;color:#888;font-size:12px;border-bottom:1px solid #eee">Item</th>'
+        html_rows += '<th style="text-align:right;padding:6px 8px;font-weight:500;color:#888;font-size:12px;border-bottom:1px solid #eee">Valor (BRL)</th></tr>'
+
+        for label, value, cls in breakdown_rows:
+            style = ""
+            td_style = "padding:6px 8px;border-bottom:0.5px solid #eee;font-size:13px;"
+            if cls == "subtotal":
+                td_style += "font-weight:500;border-top:1px solid #ccc;background:#f5f5f3;"
+            elif cls == "imp":
+                td_style += "color:#185FA5;"
+            html_rows += f'<tr><td style="{td_style}">{label}</td><td style="{td_style}text-align:right;font-weight:500">{_fmt_brl(value)}</td></tr>'
+
+        # Total line
+        total_style = "padding:6px 8px;font-weight:500;border-top:2px solid #ccc;background:#f5f5f3;font-size:13px;"
+        html_rows += f'<tr><td style="{total_style}">══ CUSTO TOTAL ALL-IN</td><td style="{total_style}text-align:right">{_fmt_brl(custo_total)}</td></tr>'
+
+        # Profit lines
+        pos_style = "padding:6px 8px;border-bottom:0.5px solid #eee;font-size:13px;color:#3b6d11;"
+        neg_style = "padding:6px 8px;border-bottom:0.5px solid #eee;font-size:13px;color:#a32d2d;"
+        neutral_style = "padding:6px 8px;border-bottom:0.5px solid #eee;font-size:13px;"
+
+        html_rows += f'<tr><td style="{pos_style}">Receita de venda</td><td style="{pos_style}text-align:right;font-weight:500">{_fmt_brl(venda)}</td></tr>'
+
+        lb_style = pos_style if lucro_bruto >= 0 else neg_style
+        html_rows += f'<tr><td style="{lb_style}">Lucro bruto</td><td style="{lb_style}text-align:right;font-weight:500">{_fmt_brl(lucro_bruto)}</td></tr>'
+
+        html_rows += f'<tr><td style="{neg_style}">IR/tributo sobre lucro ({_pct(ir_rate)})</td><td style="{neg_style}text-align:right;font-weight:500">{_fmt_brl(-IR)}</td></tr>'
+
+        ll_style = pos_style if lucro_liquido >= 0 else neg_style
+        final_style = ll_style.replace("border-bottom:0.5px solid #eee;", "border-top:2px solid #ccc;background:#f5f5f3;")
+        html_rows += f'<tr><td style="{final_style}font-weight:600">══ LUCRO LIQUIDO</td><td style="{final_style}text-align:right;font-weight:600">{_fmt_brl(lucro_liquido)}</td></tr>'
+
+        st.markdown(
+            f'<div style="background:#fff;border:0.5px solid #e0e0d8;border-radius:12px;padding:1rem 1.25rem">'
+            f'<table style="width:100%;border-collapse:collapse">{html_rows}</table></div>',
+            unsafe_allow_html=True,
+        )
+
+        # Warning note
+        st.markdown(
+            '<div style="font-size:12px;color:#777;margin-top:.75rem;line-height:1.6;padding:.75rem;'
+            'background:#fffbf0;border-left:3px solid #f0c040;border-radius:4px">'
+            '⚠️ <b>Atencao:</b> carros salvage/rebuild americanos podem ter dificuldade de regularizacao '
+            'no DETRAN dependendo do estado. Verifique a legislacao de laudos veiculares. '
+            'Nao inclui IOF sobre remessa cambial (~1.1% para PJ ou 0.38% PF). '
+            'Homologacao INMETRO e DENATRAN pode ser obrigatoria.</div>',
+            unsafe_allow_html=True,
+        )
+
+    # =========================
+    # DETALHAMENTO IMPOSTOS TAB
+    # =========================
+    if calc_tab == "Detalhamento impostos":
+        st.markdown('<div class="section-header">MEMORIA DE CALCULO — TRIBUTOS DE IMPORTACAO</div>', unsafe_allow_html=True)
+
+        imp_rows = [
+            ("Valor aduaneiro (CIF x cambio)", "Base", VA),
+            ("II — Imposto de Importacao", "35% x VA", II),
+            ("Base IPI", "VA + II", IPI_base),
+            ("IPI", f"{_pct(ipi_rate)} x base IPI", IPI),
+            ("Base PIS/COFINS", "VA + II + IPI", PIS_COFINS_base),
+            ("PIS", "2.1%", PIS),
+            ("COFINS", "9.65%", COFINS),
+            ("Base ICMS (pre-ICMS)", "soma anterior", base_pre_icms),
+            ('ICMS SP (12% "por dentro")', "base/(1-12%)x12%", ICMS),
+        ]
+
+        html_imp = '<tr><th style="text-align:left;padding:6px 8px;font-weight:500;color:#888;font-size:12px;border-bottom:1px solid #eee">Tributo</th>'
+        html_imp += '<th style="text-align:left;padding:6px 8px;font-weight:500;color:#888;font-size:12px;border-bottom:1px solid #eee">Aliquota / base</th>'
+        html_imp += '<th style="text-align:right;padding:6px 8px;font-weight:500;color:#888;font-size:12px;border-bottom:1px solid #eee">Valor</th></tr>'
+
+        td_base = "padding:6px 8px;border-bottom:0.5px solid #eee;font-size:13px;"
+        for label, aliq, value in imp_rows:
+            html_imp += (
+                f'<tr><td style="{td_base}">{label}</td>'
+                f'<td style="{td_base}color:#999;font-size:12px">{aliq}</td>'
+                f'<td style="{td_base}text-align:right;font-weight:500">{_fmt_brl(value)}</td></tr>'
+            )
+
+        # Totals
+        total_td = "padding:6px 8px;font-weight:500;border-top:1px solid #ccc;background:#f5f5f3;font-size:13px;"
+        html_imp += f'<tr><td style="{total_td}">TOTAL IMPOSTOS</td><td style="{total_td}"></td><td style="{total_td}text-align:right">{_fmt_brl(total_impostos)}</td></tr>'
+        pct_va = total_impostos / VA if VA > 0 else 0
+        html_imp += f'<tr><td style="{total_td}">% do valor aduaneiro</td><td style="{total_td}"></td><td style="{total_td}text-align:right">{_pct(pct_va)}</td></tr>'
+
+        st.markdown(
+            f'<div style="background:#fff;border:0.5px solid #e0e0d8;border-radius:12px;padding:1rem 1.25rem">'
+            f'<table style="width:100%;border-collapse:collapse">{html_imp}</table></div>',
+            unsafe_allow_html=True,
+        )
+
+        # Explanation note
+        st.markdown(
+            '<div style="font-size:12px;color:#777;margin-top:.75rem;line-height:1.6;padding:.75rem;'
+            'background:#fffbf0;border-left:3px solid #f0c040;border-radius:4px">'
+            '<b>Base de calculo (BC):</b> Para fins alfandegarios, a base e o <i>valor aduaneiro</i> = '
+            'preco CIF (Cost Insurance Freight em USD) x cambio PTAX.<br><br>'
+            '<b>Cascata dos impostos:</b> II incide sobre BC → IPI incide sobre (BC + II) → '
+            'PIS/COFINS incidem sobre (BC + II + IPI) → ICMS incide sobre tudo incluindo ele mesmo '
+            '(base "por dentro"), variando por estado. Os percentuais acima usam SP como referencia '
+            '(ICMS 12% via formula de dentro = ~13.6% sobre valor excl.).<br><br>'
+            '<b>Regimes especiais:</b> Importacao por PJ pode aproveitar credito de PIS/COFINS '
+            '(regime nao-cumulativo) se tributada pelo Lucro Real — nao considerado aqui (modelo conservador).'
+            '</div>',
+            unsafe_allow_html=True,
+        )
