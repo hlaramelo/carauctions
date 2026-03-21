@@ -121,11 +121,57 @@ class BringATrailerScraper(BaseScraper):
         if not make:
             return None
 
-        # Current bid
+        # Current bid - try multiple selectors and patterns
         bid = None
-        bid_el = soup.select_one(".info-value.bid-value, .current-bid .dollar, .bid-value")
-        if bid_el:
-            bid = self._parse_price(bid_el.get_text())
+        for selector in [
+            ".info-value.bid-value",
+            ".current-bid .dollar",
+            ".bid-value",
+            ".current-bid",
+            ".auction-stats .info-value",
+            "[data-bid]",
+            ".listing-bid-value",
+            ".stats-value",
+        ]:
+            bid_el = soup.select_one(selector)
+            if bid_el:
+                bid = self._parse_price(bid_el.get_text())
+                if bid:
+                    break
+
+        # Fallback: look for bid amount near "Current Bid" or "High Bid" text
+        if not bid:
+            for label in ["Current Bid", "High Bid", "Bid"]:
+                label_el = soup.find(string=re.compile(label, re.I))
+                if label_el:
+                    parent = label_el.find_parent()
+                    if parent:
+                        # Check siblings and parent for price
+                        for el in [parent, parent.find_parent()]:
+                            if el:
+                                price_match = re.search(r"\$[\d,]+", el.get_text())
+                                if price_match:
+                                    bid = self._parse_price(price_match.group())
+                                    if bid:
+                                        break
+                    if bid:
+                        break
+
+        # Fallback: scan page text for bid pattern
+        if not bid:
+            page_text = soup.get_text()
+            bid_match = re.search(r'(?:current\s*bid|high\s*bid)[:\s]*\$?([\d,]+)', page_text, re.I)
+            if bid_match:
+                bid = self._parse_price(bid_match.group(1))
+
+        # Fallback: meta tags
+        if not bid:
+            for meta_prop in ["product:price:amount", "og:price:amount"]:
+                meta = soup.find("meta", {"property": meta_prop})
+                if meta:
+                    bid = self._parse_price(meta.get("content", ""))
+                    if bid:
+                        break
 
         # Mileage
         mileage = None

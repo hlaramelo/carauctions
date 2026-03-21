@@ -797,6 +797,7 @@ elif page == "Monitorados":
                         car_name = f"{desc.get('year', '')} {desc.get('make', '')} {desc.get('model', '')}".strip()
                         rows.append({
                             "ID": a.id,
+                            "Plataforma": SOURCE_LABELS.get(a.source, a.source),
                             "Veiculo": car_name or "Aguardando fetch",
                             "Bid (USD)": "—",
                             "Km": "—",
@@ -830,6 +831,7 @@ elif page == "Monitorados":
 
                     rows.append({
                         "ID": a.id,
+                        "Plataforma": SOURCE_LABELS.get(a.source, a.source),
                         "Veiculo": car_name,
                         "Bid (USD)": bid_str,
                         "Km": km_str,
@@ -1057,11 +1059,11 @@ elif page == "Monitorados":
                     ended_str = vehicle.auction_end.strftime("%d/%m/%Y %H:%M") if vehicle.auction_end else "—"
                     ended_rows.append({
                         "ID": a.id,
+                        "Plataforma": SOURCE_LABELS.get(a.source, a.source),
                         "Veiculo": car_name,
                         "Bid Final (USD)": bid_str,
                         "Titulo": vehicle.title_status or "—",
                         "Encerrado em": ended_str,
-                        "Source": a.source,
                     })
                 if ended_rows:
                     df_ended = pd.DataFrame(ended_rows)

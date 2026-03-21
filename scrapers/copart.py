@@ -81,7 +81,7 @@ class CopartScraper(BaseScraper):
         lot_number = lot_match.group(1)
         logger.info(f"[Copart] Fetching single lot: {lot_number}")
 
-        # Try detail API
+        # Try detail API (solr endpoint)
         try:
             time.sleep(self.request_delay)
             response = self.session.get(
@@ -113,11 +113,39 @@ class CopartScraper(BaseScraper):
         except ValueError:
             logger.error("[Copart] Invalid JSON from detail API")
 
-        # Fallback 2: Selenium with headless Chromium (renders JS)
+        # Fallback 2: Try fetching the lot detail via search API (by lot number)
+        try:
+            logger.info("[Copart] Trying search API by lot number...")
+            vehicle = self._fetch_via_search_api(lot_number, url)
+            if vehicle:
+                logger.info(
+                    f"[Copart] Search API success: {vehicle.year} {vehicle.make} {vehicle.model} "
+                    f"bid=${vehicle.current_bid_usd}"
+                )
+                return vehicle
+        except Exception as e:
+            logger.warning(f"[Copart] Search API fallback failed: {e}")
+
+        # Fallback 3: Fetch raw HTML page and parse embedded JSON/data
+        try:
+            logger.info("[Copart] Trying direct HTML fetch...")
+            html = self.fetch_page(url)
+            if html:
+                vehicle = self._parse_from_html(html, lot_number, url)
+                if vehicle:
+                    logger.info(
+                        f"[Copart] HTML parse success: {vehicle.year} {vehicle.make} {vehicle.model} "
+                        f"bid=${vehicle.current_bid_usd}"
+                    )
+                    return vehicle
+        except Exception as e:
+            logger.warning(f"[Copart] HTML fetch fallback failed: {e}")
+
+        # Fallback 4: Selenium with headless Chromium (renders JS)
         try:
             logger.info("[Copart] Trying Selenium headless browser...")
             vehicle = self._fetch_with_selenium(url, lot_number)
-            if vehicle and vehicle.current_bid_usd:
+            if vehicle:
                 logger.info(
                     f"[Copart] Selenium success: {vehicle.year} {vehicle.make} {vehicle.model} "
                     f"bid=${vehicle.current_bid_usd}"
@@ -126,11 +154,50 @@ class CopartScraper(BaseScraper):
         except Exception as e:
             logger.warning(f"[Copart] Selenium fallback failed: {e}")
 
-        # Fallback 3: parse info from the URL slug itself
+        # Fallback 5: parse info from the URL slug itself
         vehicle = self._parse_from_url(url, lot_number)
         if vehicle:
             logger.info(f"[Copart] Parsed from URL: {vehicle.year} {vehicle.make} {vehicle.model}")
         return vehicle
+
+    def _fetch_via_search_api(self, lot_number: str, url: str) -> Vehicle | None:
+        """Try to find a lot via the Copart search API using lot number as query."""
+        time.sleep(self.request_delay)
+        payload = {
+            "query": [lot_number],
+            "filter": {},
+            "sort": ["auction_date_type desc"],
+            "page": 0,
+            "size": 5,
+        }
+        try:
+            response = self.session.post(
+                COPART_SEARCH_URL, json=payload, timeout=15
+            )
+            if response.status_code == 403:
+                logger.warning("[Copart] Blocked (403) on search API")
+                return None
+            response.raise_for_status()
+            data = response.json()
+
+            content = data.get("data", {}).get("results", {}).get("content", [])
+            for item in content:
+                item_lot = str(item.get("ln") or item.get("lotNumberStr") or "")
+                if item_lot == lot_number:
+                    vehicle = self._parse_result(item)
+                    if vehicle:
+                        vehicle.url = url
+                        return vehicle
+
+            # If exact lot not found but we have results, try first one
+            if content:
+                vehicle = self._parse_result(content[0])
+                if vehicle:
+                    vehicle.url = url
+                    return vehicle
+        except (requests.RequestException, ValueError) as e:
+            logger.error(f"[Copart] Search API by lot failed: {e}")
+        return None
 
     def _fetch_with_selenium(self, url: str, lot_number: str) -> Vehicle | None:
         """Use Selenium headless Chromium to render Copart page and extract data."""
@@ -359,17 +426,42 @@ class CopartScraper(BaseScraper):
             # Try to find JSON-LD or embedded lot data in script tags
             for script in soup.find_all("script"):
                 text = script.string or ""
-                # Look for lot data in JavaScript variables
-                lot_json_match = re.search(r'lotDetails\s*[=:]\s*({.+?});', text, re.DOTALL)
-                if lot_json_match:
+
+                # Look for lot data in JavaScript variables (multiple patterns)
+                for pattern in [
+                    r'lotDetails\s*[=:]\s*({.+?});',
+                    r'lot_details\s*[=:]\s*({.+?});',
+                    r'"lotDetails"\s*:\s*({.+?})\s*[,}]',
+                    r'__NEXT_DATA__.*?"lotDetails"\s*:\s*({.+?})\s*[,}]',
+                ]:
+                    lot_json_match = re.search(pattern, text, re.DOTALL)
+                    if lot_json_match:
+                        try:
+                            lot_data = json.loads(lot_json_match.group(1))
+                            vehicle = self._parse_result(lot_data)
+                            if vehicle:
+                                return vehicle
+                        except (json.JSONDecodeError, Exception):
+                            pass
+
+                # Try to find __NEXT_DATA__ or server-side rendered JSON state
+                if '__NEXT_DATA__' in text or 'window.__INITIAL_STATE__' in text:
                     try:
-                        lot_data = json.loads(lot_json_match.group(1))
-                        return self._parse_result(lot_data)
+                        # Extract the full JSON blob
+                        json_match = re.search(r'(?:__NEXT_DATA__|__INITIAL_STATE__)\s*=\s*({.+?})\s*;?\s*(?:</script>|$)', text, re.DOTALL)
+                        if json_match:
+                            full_data = json.loads(json_match.group(1))
+                            # Deep-search for lot data with bid info
+                            bid_data = self._find_lot_data_in_json(full_data, lot_number)
+                            if bid_data:
+                                vehicle = self._parse_result(bid_data)
+                                if vehicle:
+                                    return vehicle
                     except (json.JSONDecodeError, Exception):
                         pass
 
                 # Look for JSON-LD structured data
-                if '"@type"' in text and '"Vehicle"' in text:
+                if '"@type"' in text and ('"Vehicle"' in text or '"Product"' in text or '"Car"' in text):
                     try:
                         ld_data = json.loads(text)
                         if isinstance(ld_data, list):
@@ -385,8 +477,10 @@ class CopartScraper(BaseScraper):
                             model = parts[1] if len(parts) > 1 else ""
                             bid = None
                             offers = ld_data.get("offers", {})
+                            if isinstance(offers, list):
+                                offers = offers[0] if offers else {}
                             if offers:
-                                bid = offers.get("price")
+                                bid = offers.get("price") or offers.get("lowPrice")
                             return Vehicle(
                                 source=self.SOURCE_NAME,
                                 source_id=f"copart_{lot_number}",
@@ -406,26 +500,59 @@ class CopartScraper(BaseScraper):
             year_m = re.search(r"(\d{4})", title_text)
             year = int(year_m.group(1)) if year_m else None
 
-            # Extract bid from page
+            # Extract bid from page - try multiple approaches
             current_bid = None
-            bid_el = soup.find(string=re.compile(r"Current bid", re.I))
-            if bid_el:
-                parent = bid_el.find_parent()
-                if parent:
-                    price_text = parent.find_next(string=re.compile(r"\$[\d,]+"))
-                    if price_text:
-                        price_clean = re.sub(r"[^\d.]", "", price_text)
-                        if price_clean:
-                            current_bid = float(price_clean)
 
-            # Also try meta tags for price
+            # Approach 1: data-uname attribute (Copart's custom attributes)
+            for selector in [
+                "[data-uname='lotdetailCurrentBidValue']",
+                "[data-uname='lotdetailBidNowValue']",
+                ".bid-price",
+                ".current-bid-value",
+                "#current-bid-value",
+            ]:
+                el = soup.select_one(selector)
+                if el:
+                    price_clean = re.sub(r"[^\d.]", "", el.get_text(strip=True))
+                    if price_clean:
+                        current_bid = float(price_clean)
+                        break
+
+            # Approach 2: "Current bid" label
             if not current_bid:
-                price_meta = soup.find("meta", {"property": "product:price:amount"})
-                if price_meta:
-                    try:
-                        current_bid = float(price_meta.get("content", 0))
-                    except (ValueError, TypeError):
-                        pass
+                bid_el = soup.find(string=re.compile(r"Current bid", re.I))
+                if bid_el:
+                    parent = bid_el.find_parent()
+                    if parent:
+                        price_text = parent.find_next(string=re.compile(r"\$[\d,]+"))
+                        if price_text:
+                            price_clean = re.sub(r"[^\d.]", "", price_text)
+                            if price_clean:
+                                current_bid = float(price_clean)
+
+            # Approach 3: meta tags
+            if not current_bid:
+                for meta_prop in ["product:price:amount", "og:price:amount", "price"]:
+                    price_meta = soup.find("meta", {"property": meta_prop}) or soup.find("meta", {"name": meta_prop})
+                    if price_meta:
+                        try:
+                            val = float(price_meta.get("content", 0))
+                            if val > 0:
+                                current_bid = val
+                                break
+                        except (ValueError, TypeError):
+                            pass
+
+            # Approach 4: scan for price patterns near bid-related text
+            if not current_bid:
+                page_text = soup.get_text()
+                bid_area = re.search(r'(?:current\s*bid|high\s*bid|your\s*bid)[:\s]*\$?([\d,]+(?:\.\d{2})?)', page_text, re.I)
+                if bid_area:
+                    price_clean = bid_area.group(1).replace(",", "")
+                    if price_clean:
+                        val = float(price_clean)
+                        if 10 < val < 1_000_000:
+                            current_bid = val
 
             # Extract mileage
             mileage = None
@@ -492,6 +619,35 @@ class CopartScraper(BaseScraper):
         except Exception as e:
             logger.warning(f"[Copart] HTML parsing error: {e}")
 
+        return None
+
+    def _find_lot_data_in_json(self, data, lot_number: str, depth: int = 0) -> dict | None:
+        """Recursively search a nested JSON structure for lot data."""
+        if depth > 10:
+            return None
+        if isinstance(data, dict):
+            # Check if this dict looks like lot data
+            ln = str(data.get("ln") or data.get("lotNumberStr") or data.get("lotNumber") or "")
+            if ln == lot_number and (data.get("mkn") or data.get("makeName") or data.get("make")):
+                return data
+            # Check nested keys
+            for key in ["lotDetails", "lotDetail", "lot", "data", "props", "pageProps"]:
+                if key in data:
+                    result = self._find_lot_data_in_json(data[key], lot_number, depth + 1)
+                    if result:
+                        return result
+            # Search all dict values
+            for v in data.values():
+                if isinstance(v, (dict, list)):
+                    result = self._find_lot_data_in_json(v, lot_number, depth + 1)
+                    if result:
+                        return result
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, (dict, list)):
+                    result = self._find_lot_data_in_json(item, lot_number, depth + 1)
+                    if result:
+                        return result
         return None
 
     def _parse_from_url(self, url: str, lot_number: str) -> Vehicle | None:

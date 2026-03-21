@@ -49,15 +49,44 @@ class CarsAndBidsScraper(BaseScraper):
         if not make:
             return None
 
-        # Current bid
+        # Current bid - try multiple selectors
         bid = None
-        bid_el = soup.select_one(".current-bid, .bid-value, .auction-bid, .bid-amount")
-        if bid_el:
-            bid = self._parse_price(bid_el.get_text())
+        for selector in [
+            ".current-bid",
+            ".bid-value",
+            ".auction-bid",
+            ".bid-amount",
+            "[data-bid]",
+            ".highest-bid",
+            ".price",
+        ]:
+            bid_el = soup.select_one(selector)
+            if bid_el:
+                bid = self._parse_price(bid_el.get_text())
+                if bid:
+                    break
+
+        # Fallback: look for bid text patterns
+        if not bid:
+            page_text = soup.get_text()
+            bid_match = re.search(r'(?:current\s*bid|high\s*bid|winning\s*bid)[:\s]*\$?([\d,]+)', page_text, re.I)
+            if bid_match:
+                bid = self._parse_price(bid_match.group(1))
+
+        # Fallback: any price on the page
         if not bid:
             bid_match = re.search(r"\$[\d,]+", soup.get_text())
             if bid_match:
                 bid = self._parse_price(bid_match.group())
+
+        # Fallback: meta tags
+        if not bid:
+            for meta_prop in ["product:price:amount", "og:price:amount"]:
+                meta = soup.find("meta", {"property": meta_prop})
+                if meta:
+                    bid = self._parse_price(meta.get("content", ""))
+                    if bid:
+                        break
 
         # Auction end
         auction_end = None

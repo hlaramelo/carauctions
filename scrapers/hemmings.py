@@ -47,16 +47,43 @@ class HemmingsScraper(BaseScraper):
         if not make:
             return None
 
-        # Price
+        # Price - try multiple selectors
         price = None
-        price_el = soup.select_one(".listing-price, .price, [data-price], .asking-price")
-        if price_el:
-            price_text = price_el.get("data-price", "") or price_el.get_text(strip=True)
-            price = self._parse_price(price_text)
+        for selector in [
+            ".listing-price",
+            ".price",
+            "[data-price]",
+            ".asking-price",
+            ".vehicle-price",
+            ".detail-price",
+        ]:
+            price_el = soup.select_one(selector)
+            if price_el:
+                price_text = price_el.get("data-price", "") or price_el.get_text(strip=True)
+                price = self._parse_price(price_text)
+                if price:
+                    break
+
+        # Fallback: search page text for price patterns
+        if not price:
+            page_text = soup.get_text()
+            price_match = re.search(r'(?:price|asking)[:\s]*\$?([\d,]+)', page_text, re.I)
+            if price_match:
+                price = self._parse_price(price_match.group(1))
+
         if not price:
             price_match = re.search(r"\$[\d,]+", soup.get_text())
             if price_match:
                 price = self._parse_price(price_match.group())
+
+        # Fallback: meta tags
+        if not price:
+            for meta_prop in ["product:price:amount", "og:price:amount"]:
+                meta = soup.find("meta", {"property": meta_prop})
+                if meta:
+                    price = self._parse_price(meta.get("content", ""))
+                    if price:
+                        break
 
         # Mileage
         mileage = None
