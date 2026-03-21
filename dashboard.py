@@ -10,13 +10,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Also load Streamlit secrets into env vars (for Streamlit Cloud)
+_SECRETS_KEYS = [
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DATABASE_URL",
+    "SMTP_USER", "SMTP_PASSWORD", "EMAIL_FROM", "EMAIL_TO",
+]
 try:
     import streamlit as st
-    for key in ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DATABASE_URL"]:
+    for key in _SECRETS_KEYS:
         if key not in os.environ or not os.environ[key]:
-            val = st.secrets.get(key, "")
-            if val:
-                os.environ[key] = val
+            try:
+                val = st.secrets[key]
+                if val:
+                    os.environ[key] = str(val)
+            except (KeyError, FileNotFoundError):
+                pass
 except Exception:
     pass
 
@@ -40,9 +47,18 @@ init_db()
 # Start Telegram bot polling (once per Streamlit session)
 if "telegram_bot_started" not in st.session_state:
     _bot = TelegramCommandHandler()
+    _token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     if _bot.is_configured:
         _bot.start_polling()
-    st.session_state["telegram_bot_started"] = True
+        st.session_state["telegram_bot_started"] = True
+    elif _token:
+        # Token exists but bot doesn't see it — force re-init
+        _bot.bot_token = _token
+        _bot.api_base = f"https://api.telegram.org/bot{_token}"
+        _bot.start_polling()
+        st.session_state["telegram_bot_started"] = True
+    else:
+        st.session_state["telegram_bot_started"] = False
 
 # =============================================================================
 # STYLING
