@@ -102,6 +102,7 @@ def init_db():
     from models.br_listing import BRMarketListing, BRPriceSnapshot  # noqa: F401
     from models.watchlist import WatchlistItem, UserPreferences  # noqa: F401
     from models.monitored_auction import MonitoredAuction  # noqa: F401
+    from models.search_profile import SearchProfile  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     _run_migrations()

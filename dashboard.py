@@ -38,6 +38,7 @@ from models.monitored_auction import MonitoredAuction
 from models.vehicle import Vehicle, PriceHistory
 from models.br_listing import BRMarketListing, BRPriceSnapshot
 from models.watchlist import WatchlistItem
+from models.search_profile import SearchProfile
 from engine.monitor_engine import MonitorEngine
 from engine.price_history import BRMarketAnalyzer
 from engine.currency import get_usd_brl_rate, _cache as _currency_cache
@@ -505,7 +506,7 @@ with st.sidebar:
     st.markdown("### Navegacao")
     page = st.radio(
         "Selecionar pagina",
-        ["Dashboard", "Deals", "Monitorados", "Analise de Mercado", "Calculadora ROI"],
+        ["Dashboard", "Deals", "Monitorados", "Watchlist", "Perfis de Busca", "Analise de Mercado", "Calculadora ROI"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -577,23 +578,89 @@ elif page == "Deals":
     else:
         df = pd.DataFrame(rows)
 
+        # Quick profile selector
+        _profile_session = get_session()
+        try:
+            _saved_profiles = _profile_session.execute(
+                select(SearchProfile).where(SearchProfile.is_active == True)  # noqa: E712
+            ).scalars().all()
+        except Exception:
+            _saved_profiles = []
+        finally:
+            _profile_session.close()
+
+        if _saved_profiles:
+            profile_names = ["(sem perfil)"] + [p.name for p in _saved_profiles]
+            selected_profile_name = st.selectbox(
+                "Perfil de busca",
+                profile_names,
+                index=0,
+                help="Selecione um perfil salvo para aplicar filtros automaticamente",
+            )
+            _active_profile = None
+            if selected_profile_name != "(sem perfil)":
+                _active_profile = next(
+                    (p for p in _saved_profiles if p.name == selected_profile_name), None
+                )
+        else:
+            _active_profile = None
+
+        # Compute defaults from profile or show all
+        default_score = 0
+        default_makes = sorted(df["Make"].unique())
+        default_sources = sorted(df["Source"].unique())
+
+        if _active_profile:
+            if _active_profile.min_score:
+                default_score = _active_profile.min_score
+            if _active_profile.makes:
+                default_makes = [m for m in _active_profile.makes if m in df["Make"].values]
+            if _active_profile.sources:
+                default_sources = [s for s in _active_profile.sources if s in df["Source"].values]
+
         # Filters
         with st.container():
             col1, col2, col3 = st.columns(3)
             with col1:
-                min_score = st.slider("Score minimo", 0, 100, 0)
+                min_score = st.slider("Score minimo", 0, 100, default_score)
             with col2:
                 makes = sorted(df["Make"].unique())
-                selected_makes = st.multiselect("Marcas", makes, default=makes)
+                selected_makes = st.multiselect("Marcas", makes, default=default_makes)
             with col3:
                 sources = sorted(df["Source"].unique())
-                selected_sources = st.multiselect("Fontes", sources, default=sources)
+                selected_sources = st.multiselect("Fontes", sources, default=default_sources)
 
         mask = (
             (df["Score"] >= min_score)
             & df["Make"].isin(selected_makes)
             & df["Source"].isin(selected_sources)
         )
+
+        # Apply extra profile filters
+        if _active_profile:
+            if _active_profile.min_year:
+                mask &= df["Year"] >= _active_profile.min_year
+            if _active_profile.max_year:
+                mask &= df["Year"] <= _active_profile.max_year
+            if _active_profile.max_price_usd:
+                mask &= df["Bid (USD)"] <= _active_profile.max_price_usd
+            if _active_profile.min_margin_pct:
+                mask &= df["Margem %"] >= _active_profile.min_margin_pct
+            if _active_profile.max_mileage:
+                mask &= (df["Mileage"].isna()) | (df["Mileage"] <= _active_profile.max_mileage)
+            if _active_profile.title_statuses:
+                mask &= df["Title"].str.lower().isin([t.lower() for t in _active_profile.title_statuses])
+            if _active_profile.keywords:
+                kw_list = [k.strip().lower() for k in _active_profile.keywords.split(",") if k.strip()]
+                if kw_list:
+                    searchable = (
+                        df["Make"].str.lower().fillna("") + " " +
+                        df["Model"].str.lower().fillna("") + " " +
+                        df.get("Trim", pd.Series([""] * len(df))).str.lower().fillna("")
+                    )
+                    for kw in kw_list:
+                        mask &= searchable.str.contains(kw, na=False)
+
         filtered = df[mask]
 
         st.caption(f"Mostrando {len(filtered)} de {len(df)} deals")
@@ -1090,51 +1157,70 @@ elif page == "Monitorados":
                                     _remove_auction(a.id)
                                     st.rerun()
 
-        # =================================================================
-        # WATCHLIST — adicionar + listar
-        # =================================================================
-        st.divider()
-        section("Watchlist")
+    finally:
+        session.close()
 
-        # --- Add watch form ---
-        with st.form("add_watch", clear_on_submit=True):
-            st.caption("Adicionar veiculo a watchlist (tambem pode usar /watch no Telegram)")
-            wc1, wc2, wc3 = st.columns(3)
-            with wc1:
-                w_make = st.text_input("Marca", placeholder="Porsche")
-                w_model = st.text_input("Modelo", placeholder="911")
-            with wc2:
-                w_year_min = st.number_input("Ano de", value=0, min_value=0, max_value=2030, step=1)
-                w_year_max = st.number_input("Ano ate", value=0, min_value=0, max_value=2030, step=1)
-            with wc3:
-                w_keywords = st.text_input("Keywords", placeholder="993, Turbo")
-                w_max_price = st.number_input("Preco max (USD)", value=0, min_value=0, step=1000)
-            w_submitted = st.form_submit_button("Adicionar a Watchlist")
+# =============================================================================
+# WATCHLIST
+# =============================================================================
+elif page == "Watchlist":
+    section("Watchlist")
 
-        if w_submitted and w_make and w_model:
+    # --- Add watch form ---
+    st.caption("Adicione veiculos para receber alertas quando aparecerem em leiloes")
+    with st.form("add_watch", clear_on_submit=True):
+        wc1, wc2 = st.columns(2)
+        with wc1:
+            w_make = st.text_input("Marca *", placeholder="Porsche")
+            w_model = st.text_input("Modelo *", placeholder="911")
+            w_vin = st.text_input("VIN (opcional)", placeholder="WP0AB29945S740123", max_chars=17)
+        with wc2:
+            w_year_min = st.number_input("Ano de", value=0, min_value=0, max_value=2030, step=1)
+            w_year_max = st.number_input("Ano ate", value=0, min_value=0, max_value=2030, step=1)
+            w_max_price = st.number_input("Preco max (USD)", value=0, min_value=0, step=1000)
+        w_keywords = st.text_input("Keywords (separadas por virgula)", placeholder="993, Turbo, manual")
+        w_notes = st.text_input("Notas pessoais", placeholder="Para o cliente X")
+        w_submitted = st.form_submit_button("Adicionar a Watchlist")
+
+    if w_submitted:
+        has_make = w_make and w_model
+        has_vin = w_vin and len(w_vin.strip()) == 17
+        if not has_make and not has_vin:
+            st.error("Preencha Marca + Modelo, ou um VIN valido (17 caracteres).")
+        else:
+            session = get_session()
             try:
                 new_watch = WatchlistItem(
-                    make=w_make.strip(),
-                    model=w_model.strip(),
+                    make=w_make.strip() if w_make else None,
+                    model=w_model.strip() if w_model else None,
+                    vin=w_vin.strip().upper() if has_vin else None,
                     year_min=w_year_min if w_year_min > 0 else None,
                     year_max=w_year_max if w_year_max > 0 else None,
                     keywords=w_keywords.strip() if w_keywords.strip() else None,
                     max_price_usd=float(w_max_price) if w_max_price > 0 else None,
+                    notes=w_notes.strip() if w_notes.strip() else None,
                     chat_id="dashboard",
                 )
                 session.add(new_watch)
                 session.commit()
-                year_str = ""
-                if w_year_min > 0 and w_year_max > 0:
-                    year_str = f" ({w_year_min}-{w_year_max})"
-                price_str = f" | Max ${w_max_price:,.0f}" if w_max_price > 0 else ""
-                st.success(f"Adicionado: {w_make} {w_model}{year_str}{price_str}")
+                if has_vin:
+                    st.success(f"Adicionado: VIN {w_vin.strip().upper()}")
+                else:
+                    year_str = ""
+                    if w_year_min > 0 and w_year_max > 0:
+                        year_str = f" ({w_year_min}-{w_year_max})"
+                    price_str = f" | Max ${w_max_price:,.0f}" if w_max_price > 0 else ""
+                    st.success(f"Adicionado: {w_make} {w_model}{year_str}{price_str}")
                 st.rerun()
             except Exception as e:
                 session.rollback()
                 st.error(f"Erro: {e}")
+            finally:
+                session.close()
 
-        # --- List watchlist items ---
+    # --- List watchlist items ---
+    session = get_session()
+    try:
         try:
             watch_items = session.execute(
                 select(WatchlistItem).where(WatchlistItem.is_active == True)  # noqa: E712
@@ -1145,60 +1231,62 @@ elif page == "Monitorados":
             st.warning("Tabela watchlist ainda nao disponivel. Execute o pipeline para criar.")
 
         if not watch_items:
-            st.caption("Nenhum item na watchlist.")
+            st.info("Nenhum item na watchlist. Adicione usando o formulario acima.")
         else:
+            # Summary table
+            watch_rows = []
             for item in watch_items:
-                # Build label
                 label_parts = []
-                if item.year_min and item.year_max:
-                    label_parts.append(f"{item.year_min}-{item.year_max}")
-                elif item.year:
-                    label_parts.append(str(item.year))
-                label_parts.append(item.make or "")
-                label_parts.append(item.model or "")
                 if item.vin:
-                    label_parts.append(f"VIN:{item.vin}")
+                    label_parts.append(f"VIN: {item.vin}")
+                else:
+                    if item.year_min and item.year_max:
+                        label_parts.append(f"{item.year_min}-{item.year_max}")
+                    elif item.year:
+                        label_parts.append(str(item.year))
+                    label_parts.append(item.make or "")
+                    label_parts.append(item.model or "")
                 label = " ".join(p for p in label_parts if p).strip()
-                extras = []
-                if item.keywords:
-                    extras.append(f"kw: {item.keywords}")
-                if item.max_price_usd:
-                    extras.append(f"max: ${item.max_price_usd:,.0f}")
-                if extras:
-                    label += f" [{', '.join(extras)}]"
 
-                with st.expander(f"#{item.id} — {label}"):
-                    if item.vehicle_id:
-                        vehicle = session.get(Vehicle, item.vehicle_id)
-                        if vehicle:
-                            deal = session.execute(
-                                select(Deal).where(
-                                    Deal.vehicle_id == vehicle.id,
-                                    Deal.is_active == True,  # noqa: E712
-                                )
-                            ).scalar_one_or_none()
+                # Count matches
+                from engine.watchlist_matcher import find_matching_vehicles
+                matches = find_matching_vehicles(item, only_new=False)
+                match_count = len(matches)
 
-                            col1, col2, col3 = st.columns(3)
-                            col1.write(f"**Bid:** ${vehicle.current_bid_usd or 0:,.0f}")
-                            col2.write(f"**Source:** {vehicle.source}")
-                            if deal:
-                                col3.write(f"**Score:** {deal.score:.0f} | **Margem:** {deal.margin_pct:.1f}%")
+                watch_rows.append({
+                    "ID": item.id,
+                    "Busca": label,
+                    "Keywords": item.keywords or "—",
+                    "Max USD": f"${item.max_price_usd:,.0f}" if item.max_price_usd else "—",
+                    "Matches": match_count,
+                    "Notas": item.notes or "—",
+                    "Criado": item.created_at.strftime("%d/%m/%Y") if item.created_at else "—",
+                })
 
-                            history = get_price_history(vehicle.id)
-                            if history:
-                                hist_df = pd.DataFrame(history)
-                                st.line_chart(hist_df.set_index("timestamp")["price"])
+            df_watch = pd.DataFrame(watch_rows)
+            st.dataframe(df_watch, use_container_width=True, hide_index=True)
 
-                            st.markdown(f"[Abrir listing]({vehicle.url})")
-                    else:
-                        st.write("Veiculo ainda nao encontrado no banco de dados.")
+            # Detail expanders
+            st.divider()
+            for item in watch_items:
+                label_parts = []
+                if item.vin:
+                    label_parts.append(f"VIN: {item.vin}")
+                else:
+                    if item.year_min and item.year_max:
+                        label_parts.append(f"{item.year_min}-{item.year_max}")
+                    elif item.year:
+                        label_parts.append(str(item.year))
+                    label_parts.append(item.make or "")
+                    label_parts.append(item.model or "")
+                label = " ".join(p for p in label_parts if p).strip()
 
-                    if item.notes:
-                        st.caption(f"Notas: {item.notes}")
-                    col_info, col_remove = st.columns([3, 1])
-                    with col_info:
-                        st.caption(f"Adicionado: {item.created_at.strftime('%d/%m/%Y %H:%M')}")
-                    with col_remove:
+                matches = find_matching_vehicles(item, only_new=False)
+
+                with st.expander(f"#{item.id} — {label} ({len(matches)} matches)"):
+                    # Edit section
+                    col_edit, col_actions = st.columns([3, 1])
+                    with col_actions:
                         if st.button("Remover", key=f"rmwatch_{item.id}", type="secondary"):
                             try:
                                 db_item = session.get(WatchlistItem, item.id)
@@ -1209,6 +1297,241 @@ elif page == "Monitorados":
                             except Exception:
                                 session.rollback()
 
+                    with col_edit:
+                        if item.notes:
+                            st.caption(f"Notas: {item.notes}")
+                        st.caption(f"Adicionado: {item.created_at.strftime('%d/%m/%Y %H:%M') if item.created_at else '—'}")
+
+                    # Show matching vehicles
+                    if matches:
+                        st.markdown(f"**{len(matches)} veiculos encontrados:**")
+                        match_rows = []
+                        for v in matches[:20]:  # Limit display
+                            bid_str = f"${v.current_bid_usd:,.0f}" if v.current_bid_usd else "—"
+                            match_rows.append({
+                                "Veiculo": f"{v.year} {v.make} {v.model}" + (f" {v.trim}" if v.trim else ""),
+                                "Bid (USD)": bid_str,
+                                "Km": f"{v.mileage:,} mi" if v.mileage else "—",
+                                "Plataforma": SOURCE_LABELS.get(v.source, v.source),
+                                "Titulo": (v.title_status or "—").title(),
+                            })
+                        st.dataframe(pd.DataFrame(match_rows), use_container_width=True, hide_index=True)
+                        if len(matches) > 20:
+                            st.caption(f"... e mais {len(matches) - 20} veiculos")
+                    else:
+                        st.caption("Nenhum veiculo encontra os criterios ainda.")
+    finally:
+        session.close()
+
+# =============================================================================
+# PERFIS DE BUSCA (Saved Filters)
+# =============================================================================
+elif page == "Perfis de Busca":
+    section("Perfis de Busca")
+    st.caption("Salve combinacoes de filtros para alternar rapidamente na pagina de Deals")
+
+    session = get_session()
+    try:
+        # --- Create profile form ---
+        with st.form("add_profile", clear_on_submit=True):
+            st.markdown("**Novo Perfil**")
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                p_name = st.text_input("Nome do perfil *", placeholder="Classicos Muscle <$30k")
+                p_desc = st.text_input("Descricao", placeholder="Muscle cars americanos classicos")
+
+                # Get available makes from DB
+                try:
+                    all_makes = session.execute(
+                        select(Vehicle.make).where(Vehicle.is_active == True).distinct()  # noqa: E712
+                    ).scalars().all()
+                    all_makes = sorted([m for m in all_makes if m])
+                except Exception:
+                    all_makes = []
+
+                p_makes = st.multiselect("Marcas", all_makes)
+                p_sources = st.multiselect("Plataformas", ["copart", "bat", "carsandbids", "hemmings"])
+
+            with pc2:
+                p_year_min = st.number_input("Ano minimo", value=0, min_value=0, max_value=2030, step=1)
+                p_year_max = st.number_input("Ano maximo", value=0, min_value=0, max_value=2030, step=1)
+                p_max_price = st.number_input("Preco max (USD)", value=0, min_value=0, step=5000)
+                p_min_score = st.number_input("Score minimo", value=0, min_value=0, max_value=100, step=5)
+                p_min_margin = st.number_input("Margem minima (%)", value=0.0, min_value=0.0, max_value=100.0, step=5.0)
+                p_max_mileage = st.number_input("Km maximo", value=0, min_value=0, step=10000)
+
+            p_title_status = st.multiselect("Status do titulo", ["clean", "salvage", "rebuilt"])
+            p_keywords = st.text_input("Keywords", placeholder="turbo, manual, coupe")
+
+            p_submitted = st.form_submit_button("Salvar Perfil")
+
+        if p_submitted and p_name:
+            try:
+                profile = SearchProfile(
+                    name=p_name.strip(),
+                    description=p_desc.strip() if p_desc.strip() else None,
+                    min_year=p_year_min if p_year_min > 0 else None,
+                    max_year=p_year_max if p_year_max > 0 else None,
+                    max_price_usd=float(p_max_price) if p_max_price > 0 else None,
+                    min_score=p_min_score if p_min_score > 0 else None,
+                    min_margin_pct=p_min_margin if p_min_margin > 0 else None,
+                    max_mileage=p_max_mileage if p_max_mileage > 0 else None,
+                    keywords=p_keywords.strip() if p_keywords.strip() else None,
+                )
+                profile.makes = p_makes if p_makes else []
+                profile.sources = p_sources if p_sources else []
+                profile.title_statuses = p_title_status if p_title_status else []
+
+                session.add(profile)
+                session.commit()
+                st.success(f"Perfil '{p_name}' salvo!")
+                st.rerun()
+            except Exception as e:
+                session.rollback()
+                st.error(f"Erro: {e}")
+
+        st.divider()
+
+        # --- List profiles ---
+        try:
+            profiles = session.execute(
+                select(SearchProfile).where(SearchProfile.is_active == True)  # noqa: E712
+            ).scalars().all()
+        except Exception:
+            session.rollback()
+            profiles = []
+
+        if not profiles:
+            st.info("Nenhum perfil salvo. Crie um acima para comecar.")
+        else:
+            # Quick-apply buttons
+            st.markdown("**Seus perfis**")
+
+            for profile in profiles:
+                with st.expander(f"{profile.name}" + (f" — {profile.description}" if profile.description else "")):
+                    # Show profile filters
+                    filter_parts = []
+                    if profile.makes:
+                        filter_parts.append(f"**Marcas:** {', '.join(profile.makes)}")
+                    if profile.sources:
+                        src_labels = [SOURCE_LABELS.get(s, s) for s in profile.sources]
+                        filter_parts.append(f"**Plataformas:** {', '.join(src_labels)}")
+                    if profile.min_year or profile.max_year:
+                        yr = ""
+                        if profile.min_year and profile.max_year:
+                            yr = f"{profile.min_year}–{profile.max_year}"
+                        elif profile.min_year:
+                            yr = f"a partir de {profile.min_year}"
+                        else:
+                            yr = f"ate {profile.max_year}"
+                        filter_parts.append(f"**Anos:** {yr}")
+                    if profile.max_price_usd:
+                        filter_parts.append(f"**Preco max:** ${profile.max_price_usd:,.0f}")
+                    if profile.min_score:
+                        filter_parts.append(f"**Score min:** {profile.min_score}")
+                    if profile.min_margin_pct:
+                        filter_parts.append(f"**Margem min:** {profile.min_margin_pct:.0f}%")
+                    if profile.max_mileage:
+                        filter_parts.append(f"**Km max:** {profile.max_mileage:,}")
+                    if profile.title_statuses:
+                        filter_parts.append(f"**Titulo:** {', '.join(profile.title_statuses)}")
+                    if profile.keywords:
+                        filter_parts.append(f"**Keywords:** {profile.keywords}")
+
+                    if filter_parts:
+                        st.markdown(" | ".join(filter_parts))
+                    else:
+                        st.caption("Sem filtros definidos (mostra tudo)")
+
+                    # Apply profile — show matching deals
+                    col_apply, col_remove = st.columns([3, 1])
+                    with col_apply:
+                        if st.button("Ver deals com este perfil", key=f"apply_profile_{profile.id}"):
+                            st.session_state["active_profile_id"] = profile.id
+                            st.session_state["active_profile_name"] = profile.name
+                    with col_remove:
+                        if st.button("Excluir", key=f"rm_profile_{profile.id}", type="secondary"):
+                            try:
+                                db_profile = session.get(SearchProfile, profile.id)
+                                if db_profile:
+                                    db_profile.is_active = False
+                                    session.commit()
+                                st.rerun()
+                            except Exception:
+                                session.rollback()
+
+            # Show filtered deals if a profile is active
+            active_pid = st.session_state.get("active_profile_id")
+            if active_pid:
+                active_profile = session.get(SearchProfile, active_pid)
+                if active_profile and active_profile.is_active:
+                    st.divider()
+                    active_name = st.session_state.get("active_profile_name", "")
+                    section(f"Deals — {active_name}")
+
+                    rows = get_deals_df()
+                    if rows:
+                        df = pd.DataFrame(rows)
+
+                        # Apply profile filters
+                        mask = pd.Series([True] * len(df))
+
+                        if active_profile.makes:
+                            mask &= df["Make"].str.lower().isin([m.lower() for m in active_profile.makes])
+                        if active_profile.sources:
+                            mask &= df["Source"].str.lower().isin([s.lower() for s in active_profile.sources])
+                        if active_profile.min_year:
+                            mask &= df["Year"] >= active_profile.min_year
+                        if active_profile.max_year:
+                            mask &= df["Year"] <= active_profile.max_year
+                        if active_profile.max_price_usd:
+                            mask &= df["Bid (USD)"] <= active_profile.max_price_usd
+                        if active_profile.min_score:
+                            mask &= df["Score"] >= active_profile.min_score
+                        if active_profile.min_margin_pct:
+                            mask &= df["Margem %"] >= active_profile.min_margin_pct
+                        if active_profile.max_mileage:
+                            mask &= (df["Mileage"].isna()) | (df["Mileage"] <= active_profile.max_mileage)
+                        if active_profile.title_statuses:
+                            mask &= df["Title"].str.lower().isin([t.lower() for t in active_profile.title_statuses])
+                        if active_profile.keywords:
+                            kw_list = [k.strip().lower() for k in active_profile.keywords.split(",") if k.strip()]
+                            if kw_list:
+                                searchable = (
+                                    df["Make"].str.lower().fillna("") + " " +
+                                    df["Model"].str.lower().fillna("") + " " +
+                                    df.get("Trim", pd.Series([""] * len(df))).str.lower().fillna("")
+                                )
+                                for kw in kw_list:
+                                    mask &= searchable.str.contains(kw, na=False)
+
+                        filtered = df[mask]
+                        st.caption(f"Mostrando {len(filtered)} de {len(df)} deals")
+
+                        display_cols = [
+                            "Score", "Year", "Make", "Model", "Trim", "Bid (USD)",
+                            "Custo Total (BRL)", "Venda BR (BRL)", "Lucro (BRL)",
+                            "Margem %", "Mileage", "Title", "Source",
+                        ]
+                        st.dataframe(
+                            filtered[display_cols],
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Score": st.column_config.NumberColumn(format="%.1f"),
+                                "Bid (USD)": st.column_config.NumberColumn(format="$ %d"),
+                                "Custo Total (BRL)": st.column_config.NumberColumn(format="R$ %d"),
+                                "Venda BR (BRL)": st.column_config.NumberColumn(format="R$ %d"),
+                                "Lucro (BRL)": st.column_config.NumberColumn(format="R$ %d"),
+                                "Margem %": st.column_config.NumberColumn(format="%.1f %%"),
+                                "Mileage": st.column_config.NumberColumn(format="%d km"),
+                            },
+                        )
+
+                    if st.button("Limpar filtro"):
+                        del st.session_state["active_profile_id"]
+                        del st.session_state["active_profile_name"]
+                        st.rerun()
     finally:
         session.close()
 
