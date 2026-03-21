@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 
 from dotenv import load_dotenv
@@ -43,12 +44,17 @@ logger.add(
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | {message}",
     level="INFO",
 )
-logger.add(
-    "logs/carauctions_{time:YYYY-MM-DD}.log",
-    rotation="1 day",
-    retention="30 days",
-    level="DEBUG",
-)
+# File logging (skip if logs dir can't be created, e.g. on Railway)
+try:
+    os.makedirs("logs", exist_ok=True)
+    logger.add(
+        "logs/carauctions_{time:YYYY-MM-DD}.log",
+        rotation="1 day",
+        retention="30 days",
+        level="DEBUG",
+    )
+except Exception:
+    pass
 
 
 def run_scheduled():
