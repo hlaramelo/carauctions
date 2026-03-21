@@ -33,20 +33,63 @@ SessionLocal = sessionmaker(bind=engine)
 
 
 def _run_migrations():
-    """Add missing columns to existing tables (lightweight migration)."""
+    """Add missing columns to existing tables (lightweight migration).
+
+    SQLAlchemy's create_all() only creates NEW tables, it never alters
+    existing ones.  This function inspects the live schema and ADDs any
+    columns that are defined in the models but missing in the database.
+    """
     migration_columns = [
+        # ---- watchlist ----
+        ("watchlist", "vehicle_id", "INTEGER"),
+        ("watchlist", "vin", "VARCHAR(17)"),
+        ("watchlist", "make", "VARCHAR(100)"),
+        ("watchlist", "model", "VARCHAR(100)"),
+        ("watchlist", "year", "INTEGER"),
+        ("watchlist", "year_min", "INTEGER"),
+        ("watchlist", "year_max", "INTEGER"),
+        ("watchlist", "keywords", "VARCHAR(500)"),
         ("watchlist", "max_price_usd", "FLOAT"),
+        ("watchlist", "notes", "TEXT"),
+        ("watchlist", "chat_id", "VARCHAR(50)"),
+        ("watchlist", "is_active", "BOOLEAN DEFAULT TRUE"),
+        ("watchlist", "notified_vehicle_ids", "TEXT"),
+        ("watchlist", "created_at", "TIMESTAMP"),
+        # ---- vehicles ----
+        ("vehicles", "trim", "VARCHAR(200)"),
+        ("vehicles", "vin", "VARCHAR(17)"),
+        ("vehicles", "buy_now_price_usd", "FLOAT"),
+        ("vehicles", "reserve_met", "BOOLEAN"),
+        ("vehicles", "damage_description", "TEXT"),
+        ("vehicles", "location_state", "VARCHAR(2)"),
+        ("vehicles", "location_city", "VARCHAR(100)"),
         ("vehicles", "engine_cc", "INTEGER"),
+        ("vehicles", "auction_end", "TIMESTAMP"),
+        ("vehicles", "br_price_avg", "FLOAT"),
+        ("vehicles", "br_price_min", "FLOAT"),
+        ("vehicles", "br_price_max", "FLOAT"),
+        ("vehicles", "br_listings_count", "INTEGER"),
+        ("vehicles", "fipe_price_brl", "FLOAT"),
+        # ---- monitored_auctions ----
+        ("monitored_auctions", "vehicle_id", "INTEGER"),
+        ("monitored_auctions", "last_checked_at", "TIMESTAMP"),
+        ("monitored_auctions", "chat_id", "VARCHAR(50)"),
+        # ---- user_preferences ----
+        ("user_preferences", "alerts_paused", "BOOLEAN DEFAULT FALSE"),
+        ("user_preferences", "custom_filters", "TEXT"),
     ]
     try:
         inspector = inspect(engine)
+        tables = inspector.get_table_names()
         with engine.begin() as conn:
             for table, column, col_type in migration_columns:
-                if table not in inspector.get_table_names():
+                if table not in tables:
                     continue
                 existing = [c["name"] for c in inspector.get_columns(table)]
                 if column not in existing:
-                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                    conn.execute(text(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
+                    ))
                     logger.info(f"[DB] Added column {table}.{column}")
     except Exception as e:
         logger.warning(f"[DB] Migration check failed (non-fatal): {e}")
