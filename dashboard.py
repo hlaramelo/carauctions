@@ -5,6 +5,7 @@ Run with: streamlit run dashboard.py
 
 import json
 import os
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -773,66 +774,85 @@ elif page == "Monitorados":
             st.info("Nenhum leilao monitorado. Cole uma URL acima para comecar.")
         else:
             monitor_engine = MonitorEngine()
-            rows = []
+
+            # Separate active vs ended auctions
+            active_auctions = []
+            ended_auctions = []
+            now = datetime.now(timezone.utc)
+
             for a in auctions:
-                if not a.vehicle_id:
-                    desc = _describe_from_url(a.url)
-                    car_name = f"{desc.get('year', '')} {desc.get('make', '')} {desc.get('model', '')}".strip()
+                if a.vehicle_id:
+                    vehicle = session.get(Vehicle, a.vehicle_id)
+                    if vehicle and vehicle.auction_end and vehicle.auction_end < now:
+                        ended_auctions.append(a)
+                        continue
+                active_auctions.append(a)
+
+            # ---- ACTIVE AUCTIONS TABLE ----
+            if active_auctions:
+                rows = []
+                for a in active_auctions:
+                    if not a.vehicle_id:
+                        desc = _describe_from_url(a.url)
+                        car_name = f"{desc.get('year', '')} {desc.get('make', '')} {desc.get('model', '')}".strip()
+                        rows.append({
+                            "ID": a.id,
+                            "Veiculo": car_name or "Aguardando fetch",
+                            "Bid (USD)": "—",
+                            "Km": "—",
+                            "Dano": "—",
+                            "Titulo": desc.get("title", "—"),
+                            "Local": "—",
+                            "Tempo": "—",
+                        })
+                        continue
+
+                    vehicle = session.get(Vehicle, a.vehicle_id)
+                    if not vehicle:
+                        continue
+
+                    analysis = monitor_engine.analyze(vehicle)
+                    has_end = vehicle.auction_end is not None
+                    tempo = MonitorEngine.format_time_remaining(
+                        analysis.get("tempo_restante_s"), has_auction_end=has_end
+                    )
+
+                    bid_str = f"$ {int(vehicle.current_bid_usd):,}" if vehicle.current_bid_usd else "—"
+                    km_str = f"{vehicle.mileage:,} mi" if vehicle.mileage else "—"
+                    location = ""
+                    if vehicle.location_city and vehicle.location_state:
+                        location = f"{vehicle.location_city}, {vehicle.location_state}"
+                    elif vehicle.location_state:
+                        location = vehicle.location_state
+                    car_name = f"{vehicle.year} {vehicle.make} {vehicle.model}".strip()
+                    if vehicle.trim:
+                        car_name += f" {vehicle.trim}"
+
                     rows.append({
                         "ID": a.id,
-                        "Veiculo": car_name or "Aguardando fetch",
-                        "Bid (USD)": "—",
-                        "Km": "—",
-                        "Dano": "—",
-                        "Titulo": desc.get("title", "—"),
-                        "Local": "—",
-                        "Tempo": "—",
+                        "Veiculo": car_name,
+                        "Bid (USD)": bid_str,
+                        "Km": km_str,
+                        "Dano": vehicle.damage_description or "—",
+                        "Titulo": vehicle.title_status or "—",
+                        "Local": location or "—",
+                        "Tempo": tempo,
                     })
-                    continue
 
-                vehicle = session.get(Vehicle, a.vehicle_id)
-                if not vehicle:
-                    continue
+                if rows:
+                    df_mon = pd.DataFrame(rows)
+                    st.dataframe(
+                        df_mon,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+            else:
+                st.caption("Nenhum leilao ativo no momento.")
 
-                analysis = monitor_engine.analyze(vehicle)
-                has_end = vehicle.auction_end is not None
-                tempo = MonitorEngine.format_time_remaining(
-                    analysis.get("tempo_restante_s"), has_auction_end=has_end
-                )
-
-                bid_str = f"$ {int(vehicle.current_bid_usd):,}" if vehicle.current_bid_usd else "—"
-                km_str = f"{vehicle.mileage:,} mi" if vehicle.mileage else "—"
-                location = ""
-                if vehicle.location_city and vehicle.location_state:
-                    location = f"{vehicle.location_city}, {vehicle.location_state}"
-                elif vehicle.location_state:
-                    location = vehicle.location_state
-                car_name = f"{vehicle.year} {vehicle.make} {vehicle.model}".strip()
-                if vehicle.trim:
-                    car_name += f" {vehicle.trim}"
-
-                rows.append({
-                    "ID": a.id,
-                    "Veiculo": car_name,
-                    "Bid (USD)": bid_str,
-                    "Km": km_str,
-                    "Dano": vehicle.damage_description or "—",
-                    "Titulo": vehicle.title_status or "—",
-                    "Local": location or "—",
-                    "Tempo": tempo,
-                })
-
-            if rows:
-                df_mon = pd.DataFrame(rows)
-                st.dataframe(
-                    df_mon,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                # Expanders with details and fetch buttons
+            # ---- ACTIVE AUCTIONS DETAILS ----
+            if active_auctions:
                 section("Detalhes")
-                for a in auctions:
+                for a in active_auctions:
                     if not a.vehicle_id:
                         desc = _describe_from_url(a.url)
                         desc_str = f"{desc.get('year', '')} {desc.get('make', '')} {desc.get('model', '')}".strip()
@@ -1020,7 +1040,54 @@ elif page == "Monitorados":
                                     st.rerun()
 
         # =================================================================
-        # WATCHLIST (Telegram /watch) — integrado em Monitorados
+        # ENDED AUCTIONS — leilões encerrados
+        # =================================================================
+            if ended_auctions:
+                st.divider()
+                section("Leiloes Encerrados")
+                ended_rows = []
+                for a in ended_auctions:
+                    vehicle = session.get(Vehicle, a.vehicle_id)
+                    if not vehicle:
+                        continue
+                    bid_str = f"$ {int(vehicle.current_bid_usd):,}" if vehicle.current_bid_usd else "—"
+                    car_name = f"{vehicle.year} {vehicle.make} {vehicle.model}".strip()
+                    if vehicle.trim:
+                        car_name += f" {vehicle.trim}"
+                    ended_str = vehicle.auction_end.strftime("%d/%m/%Y %H:%M") if vehicle.auction_end else "—"
+                    ended_rows.append({
+                        "ID": a.id,
+                        "Veiculo": car_name,
+                        "Bid Final (USD)": bid_str,
+                        "Titulo": vehicle.title_status or "—",
+                        "Encerrado em": ended_str,
+                        "Source": a.source,
+                    })
+                if ended_rows:
+                    df_ended = pd.DataFrame(ended_rows)
+                    st.dataframe(df_ended, use_container_width=True, hide_index=True)
+
+                    for a in ended_auctions:
+                        vehicle = session.get(Vehicle, a.vehicle_id)
+                        if not vehicle:
+                            continue
+                        car_label = f"{vehicle.year} {vehicle.make} {vehicle.model}"
+                        bid_str = f"${vehicle.current_bid_usd or 0:,.0f}"
+                        with st.expander(f"[ENCERRADO] {car_label} — {bid_str}"):
+                            analysis = monitor_engine.analyze(vehicle)
+                            col1, col2, col3 = st.columns(3)
+                            col1.metric("Bid Final", bid_str)
+                            col2.metric("Titulo", (vehicle.title_status or "—").title())
+                            if analysis and analysis.get("custo_total_brl"):
+                                col3.metric("Custo Total BR", f"R$ {analysis['custo_total_brl']:,.0f}")
+
+                            st.markdown(f"[Abrir no {a.source.title()}]({vehicle.url})")
+                            col_rm, _ = st.columns([1, 3])
+                            with col_rm:
+                                if st.button("Arquivar", key=f"archive_{a.id}", type="secondary"):
+                                    _remove_auction(a.id)
+                                    st.rerun()
+
         # =================================================================
         # WATCHLIST — adicionar + listar
         # =================================================================
