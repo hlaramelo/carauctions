@@ -34,7 +34,8 @@ class HemmingsScraper(BaseScraper):
         soup = BeautifulSoup(html, "lxml")
 
         # Extract listing ID from URL
-        id_match = re.search(r"/(\d+)(?:\?|$)", url)
+        # Supports: /classifieds/.../673541 and /listing/...-673541
+        id_match = re.search(r"-(\d+)(?:\?|$)", url) or re.search(r"/(\d+)(?:\?|$)", url)
         listing_id = id_match.group(1) if id_match else ""
         if not listing_id:
             return None

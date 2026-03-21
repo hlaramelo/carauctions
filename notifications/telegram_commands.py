@@ -553,6 +553,7 @@ class TelegramCommandHandler:
         (re.compile(r"bringatrailer\.com/listing/([^/?]+)"), "bat", "{0}"),
         (re.compile(r"carsandbids\.com/auctions/([^/?]+)"), "carsandbids", "cab_{0}"),
         (re.compile(r"hemmings\.com/classifieds/.*/(\d+)"), "hemmings", "hem_{0}"),
+        (re.compile(r"hemmings\.com/listing/[^/?]*?-(\d+)"), "hemmings", "hem_{0}"),
     ]
 
     @classmethod
