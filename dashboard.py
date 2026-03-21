@@ -31,7 +31,7 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import select, func
 
-from models.database import get_session, init_db
+from models.database import get_session, init_db, DATABASE_URL
 from models.deal import Deal
 from models.monitored_auction import MonitoredAuction
 from models.vehicle import Vehicle, PriceHistory
@@ -46,17 +46,15 @@ init_db()
 
 # Start Telegram bot polling (once per Streamlit session)
 if "telegram_bot_started" not in st.session_state:
-    _bot = TelegramCommandHandler()
     _token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    if _bot.is_configured:
+    if _token:
+        _bot = TelegramCommandHandler()
+        if not _bot.bot_token:
+            _bot.bot_token = _token
+            _bot.api_base = f"https://api.telegram.org/bot{_token}"
         _bot.start_polling()
         st.session_state["telegram_bot_started"] = True
-    elif _token:
-        # Token exists but bot doesn't see it — force re-init
-        _bot.bot_token = _token
-        _bot.api_base = f"https://api.telegram.org/bot{_token}"
-        _bot.start_polling()
-        st.session_state["telegram_bot_started"] = True
+        st.session_state["telegram_bot_instance"] = _bot
     else:
         st.session_state["telegram_bot_started"] = False
 
@@ -509,6 +507,11 @@ with st.sidebar:
         ["Dashboard", "Deals", "Monitorados", "Analise de Mercado", "Calculadora ROI"],
         label_visibility="collapsed",
     )
+    st.divider()
+    _bot_ok = st.session_state.get("telegram_bot_started", False)
+    _db_type = "PostgreSQL" if DATABASE_URL else "SQLite"
+    st.caption(f"Bot Telegram: {'Ativo' if _bot_ok else 'Inativo'}")
+    st.caption(f"Banco: {_db_type}")
 
 # =============================================================================
 # DASHBOARD
