@@ -1,0 +1,71 @@
+# Car Auction Deal Finder - Settings
+
+filters:
+  min_year: 1950
+  max_mileage: 999999
+  title_status: ["clean", "rebuilt"]
+  min_margin_pct: 15
+  max_auction_price_usd: 500000
+  makes:
+    - Porsche
+    - BMW
+    - Mercedes-Benz
+    - Ferrari
+    - Lamborghini
+    - Audi
+    - McLaren
+    - Aston Martin
+    - Bentley
+    - Maserati
+    - Rolls-Royce
+    - Jaguar
+    - Alfa Romeo
+    - De Tomaso
+    - Lotus
+  exclude_states: ["HI", "AK"]
+
+scoring:
+  weights:
+    margin: 0.40
+    liquidity: 0.20
+    condition: 0.15
+    time_remaining: 0.15
+    price_history: 0.10
+
+alerts:
+  telegram:
+    min_score: 60
+    enabled: true
+  sheets:
+    enabled: true
+    spreadsheet_name: "Car Auction Deals"
+  email:
+    enabled: true
+    min_score: 70
+    daily_digest_hour: 8
+
+scraping:
+  bring_a_trailer:
+    interval_minutes: 15
+    base_url: "https://bringatrailer.com"
+  copart:
+    interval_minutes: 30
+    max_pages: 5
+  cars_and_bids:
+    max_pages: 3
+  hemmings:
+    max_pages: 3
+  secondary_sources:
+    interval_minutes: 60
+  br_market:
+    interval_hours: 4
+    webmotors_enabled: true
+    olx_enabled: true
+    max_pages_webmotors: 5
+    max_pages_olx: 3
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  request_delay_seconds: 2
+
+currency:
+  default_usd_brl: 5.85
+  update_interval_hours: 6

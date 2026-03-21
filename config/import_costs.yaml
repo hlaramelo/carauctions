@@ -1,0 +1,42 @@
+# Import cost parameters for US -> Brazil vehicle import
+
+shipping:
+  # Shipping cost from US port to Brazil port (USD)
+  ocean_freight_usd: 3500
+  # Inland freight within US to port (USD)
+  inland_freight_us_usd: 800
+  # Insurance (percentage of vehicle value)
+  insurance_pct: 0.015
+
+taxes:
+  # Imposto de Importacao (% sobre valor CIF)
+  imposto_importacao_pct: 0.35
+  # PIS/COFINS (% sobre valor CIF + II)
+  pis_cofins_pct: 0.116
+  # ICMS por estado (% sobre valor total)
+  icms:
+    SP: 0.12
+    RJ: 0.12
+    MG: 0.12
+    PR: 0.12
+    SC: 0.12
+    RS: 0.12
+    default: 0.18
+  # IPI por cilindrada (cc)
+  ipi:
+    - max_cc: 1000
+      rate: 0.25
+    - max_cc: 2000
+      rate: 0.32
+    - max_cc: 99999
+      rate: 0.55
+
+other_costs:
+  # Despachante aduaneiro (BRL)
+  despachante_brl: 4000
+  # Armazenagem porto (BRL)
+  armazenagem_brl: 1500
+  # Homologacao INMETRO (BRL)
+  homologacao_brl: 3000
+  # Registro e emplacamento (BRL)
+  registro_brl: 2000
